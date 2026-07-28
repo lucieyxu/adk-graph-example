@@ -1,0 +1,44 @@
+@use '@src/styles/mixins.scss' as m;
+@use '@src/styles/typography.scss' as t;
+
+.container {
+    @include m.container;
+
+    height: 100%;
+    padding-top: 32rem;
+    padding-bottom: 32rem;
+    font-size: 16rem;
+}
+
+.grid {
+    @include m.grid;
+
+    height: 100%;
+}
+
+.item {
+    @include t.type(label-mono);
+
+    background-color: var(--red-100);
+    color: var(--red-500);
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.description {
+    @include t.type(body);
+
+    color: var(--gray-100);
+    margin-bottom: 16rem;
+
+    code {
+        @include t.type(label-mono);
+
+        background-color: var(--gray-900);
+        color: var(--gray-200);
+        padding: 4rem 8rem;
+        border-radius: 2rem;
+    }
+}

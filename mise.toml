@@ -1,0 +1,112 @@
+[tools]
+bun = "1.3.5"
+uv = "0.9.21"
+biome = '2.3.11'
+firebase = '15.1.0'
+ruff = '0.14.10'
+
+[env]
+ENV = "dev"
+NEXT_PUBLIC_ENV = "dev"
+__UNSET_CLOUDSDK_CORE_PROJECT__ = "__GCP_PROJECT_ID__"
+DEFAULT_SERVICE_ACCOUNT = "default-service-account@__GCP_PROJECT_ID__.iam.gserviceaccount.com"
+CLOUDSDK_CORE_NUMBER = "__GCP_PROJECT_NUMBER__"
+PROJECT_NAME = "__PROJECT_NAME__"
+NEXT_PUBLIC_GA_TAG_ID = "__NEXT_PUBLIC_GA_TAG_ID__"
+NEXT_PUBLIC_GCP_PROJECT_ID = "__GCP_PROJECT_ID__"
+UV_DEFAULT_INDEX = "https://pypi.org/simple"
+UV_INDEX_STRATEGY = "first-index"
+
+[settings]
+gpg_verify = false
+activate_aggressive = true
+env_file = "./env"
+npm.bun = true
+experimental = true
+yes = true
+jobs = 1
+
+[tasks]
+
+# - - - LOCAL
+# 
+# Daily - Run this script before beginning any work for the day
+daily = "mise self-update && git pull || true && mise run daily-googler && mise run packages && mise run gcloud-impersonate"
+daily-googler = './.scripts/install/googler.sh'
+
+# - - - PACKAGES
+# As you add apps, services, functions etc, add their dependency installation scripts here
+packages = '''
+    mise install && \
+    mise run config-git && \
+    mise run trust-recursive && \
+    mise run packages-*
+'''
+packages-gcloud = './.scripts/install/gcloud.sh'
+packages-bun = "bun install"
+packages-appengine-default-backend = "cd appengine/default/backend && mise install && mise exec -- uv sync"
+packages-appengine-public-backend = "cd appengine/public/backend && mise install && mise exec -- uv sync"
+packages-services-py-example = "cd services/py-example && mise install && mise exec -- uv sync"
+packages-jobs-py-example = "cd jobs/py-example && mise install && mise exec -- uv sync"
+packages-shared = "cd shared && mise install && mise exec -- uv sync"
+packages-agents-template = "cd agents/__template_agent_py__ && mise install && mise exec -- uv sync"
+packages-services-mcp-template = "cd services/__template_mcp_py__ && mise install && mise exec -- uv sync"
+
+
+# - - - LINT scripts
+# As you add apps, services, functions etc, add their linting scripts here
+lint = '''
+    mise run trust-recursive && \
+    mise run lint-*
+'''
+lint-appengine-default-frontend = "cd appengine/default/frontend && bun run lint"
+lint-appengine-default-backend = "cd appengine/default/backend && mise run lint"
+lint-appengine-public-frontend = "cd appengine/public/frontend && bun run lint"
+lint-appengine-public-backend = "cd appengine/public/backend && mise run lint"
+lint-services-py-example = "cd services/py-example && mise run lint"
+lint-jobs-py-example = "cd jobs/py-example && mise run lint"
+lint-shared-py = "cd shared && mise run lint"
+lint-shared-ts = "cd shared && bun run lint"
+lint-agents-template = "cd agents/__template_agent_py__ && ruff format --check . && ruff clean && ruff check ."
+lint-services-mcp-template = "cd services/__template_mcp_py__ && ruff format --check . && ruff clean && ruff check ."
+
+
+# - - - DEV scripts
+# As you add apps, services, functions etc, add their dev scripts here, and notably call them as 
+# tasks in /.vscode/tasks.json
+dev-appengine-default-frontend = "cd appengine/default/frontend && bun run dev"
+dev-appengine-default-backend = "cd appengine/default/backend && uv run src/main.py"
+dev-appengine-default-storybook = "cd appengine/default/frontend && bun run storybook"
+dev-appengine-public-frontend = "cd appengine/public/frontend && bun run dev"
+dev-appengine-public-backend = "cd appengine/public/backend && uv run src/main.py"
+dev-appengine-public-storybook = "cd appengine/public/frontend && bun run storybook"
+dev-services-py-example = "cd services/py-example && uv run src/main.py"
+dev-agents-template = "cd agents/__template_agent_py__ && uv run app.py"
+
+# - - - TESTING
+test-agents-template = "cd agents/__template_agent_py__ && uv run pytest"
+test-shared-py = "cd shared && uv run pytest"
+test = { depends = ["test-agents-template", "test-shared-py"], description = "Run all backend unit and integration tests" }
+
+deploy-agents-template = "cd agents/__template_agent_py__ && uv run deploy.py"
+
+# - - - TERRAFORM
+terraform-gcp = "./.scripts/terraform/gcp.sh"
+terraform-populate = "./.scripts/terraform/populate.sh"
+terraform-unpopulate = "./.scripts/terraform/unpopulate.sh"
+terraform-test = "./.scripts/terraform/_test.sh"
+
+# - - - MISC
+agents-cli = { run = "cd agents/__template_agent_py__ && uv run agents-cli", description = "Run agents-cli commands natively in the workspace" }
+scaffold-agent = { run = "python3 .scripts/scaffold_agent.py", description = "Scaffold a new agent using Google Agents CLI and register its tasks" }
+sync-skills = { run = "python3 .scripts/misc/sync_workspace_skills.py", description = "Sync remote developer skills from skills.json to workspace /skills" }
+trust-recursive = "./.scripts/install/trust.sh"
+config-git = "git config --global core.eol lf && git config --global core.autocrlf false"
+gcloud-impersonate = "gcloud auth application-default login --impersonate-service-account {{ get_env(name='DEFAULT_SERVICE_ACCOUNT') }}"
+build-test = './.scripts/build/_test.sh'
+appengine-dispatch = "gcloud app deploy ./appengine/dispatch.yaml"
+
+# Clean Branches - Use with caution! Permanently deletes all local git branches besides staging
+[tasks.clean-branches]
+confirm = "Are you sure you want to permanently delete all local branches except for staging?"
+run = "./.scripts/misc/clean-branches.sh"

@@ -1,0 +1,159 @@
+@use '@src/styles/typography' as t;
+@use '@shared/scss/mixins' as sm;
+
+.button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999rem;
+    border: none;
+    cursor: pointer;
+    transition: background-color 0.2s ease, color 0.2s ease;
+    user-select: none;
+    line-height: 1 !important;
+    white-space: nowrap;
+
+    background-color: var(--button-background, var(--button-internal-background, var(--white)));
+    color: var(--button-foreground, var(--button-internal-foreground, var(--black)));
+    @include sm.box-shadow-border(var(--button-border, var(--button-internal-border, var(--white))), 2rem);
+
+    &[clicked]:not(:disabled),
+    &:active {
+        background-color: var(--button-background-clicked, var(--button-internal-backgroundActive, var(--gray-300)));
+    }
+
+    &:disabled {
+        opacity: 0.75;
+        filter: grayscale(100%);
+        cursor: not-allowed;
+    }
+
+    &:focus-visible {
+        outline: 4rem solid var(--button-focus, var(--button-internal-focus, var(--gray-300)));
+        outline-offset: 4rem;
+    }
+
+    &[data-variant='secondary'] {
+        &:focus-visible {
+            outline-width: 4rem;
+            outline-offset: 6rem;
+        }
+    }
+
+}
+
+.button[data-variant='text'] {
+    padding: 0;
+    @include sm.box-shadow-border(transparent, 0rem);
+    background-color: transparent;
+    color: var(--button-foreground, var(--button-internal-background, var(--black)));
+
+    &[clicked]:not(:disabled),
+    &:active {
+        background-color: transparent;
+        color: var(--button-foreground-clicked, var(--button-internal-backgroundActive, var(--gray-300)));
+    }
+
+    &:focus-visible {
+        outline: none;
+        text-decoration: underline;
+        text-decoration-thickness: 4rem;
+        text-underline-offset: 4rem;
+        text-decoration-color: var(--button-focus, var(--button-internal-focus, var(--gray-300)));
+    }
+}
+
+.small {
+    @include t.type(button-small);
+
+    --icon-size: 32rem;
+    padding: var(--button-padding, 16rem 32rem);
+    --internal-button-gap: var(--button-gap, 16rem);
+}
+
+.medium {
+    @include t.type(button);
+    --icon-size: var(--button-icon-size, 48rem); // material icon size
+    padding: var(--button-padding, 24rem 48rem);
+    --internal-button-gap: var(--button-gap, 20rem);
+}
+
+.large {
+    @include t.type(button-large);
+    --icon-size: var(--button-icon-size, 64rem); // material icon size
+    padding: var(--button-padding, 32rem 72rem);
+    --internal-button-gap: var(--button-gap, 24rem);
+}
+
+.iconOnly {
+    &.small {
+        padding: var(--button-padding, 16rem);
+    }
+
+    &.medium {
+        padding: var(--button-padding, 24rem);
+    }
+
+    &.large {
+        padding: var(--button-padding, 32rem);
+    }
+}
+
+.iconLeft {
+    flex-direction: row-reverse;
+}
+
+.iconContainerOuter {
+    box-sizing: content-box;
+}
+
+.iconContainer {
+    position: relative;
+    line-height: 1;
+    height: 1em;
+    width: 0.75em;
+
+    display: flex;
+    align-items: center;
+    box-sizing: content-box;
+
+    .iconLeft:not(.iconOnly) & {
+        padding-right: var(--internal-button-gap);
+        justify-content: flex-end;
+    }
+
+    .iconRight:not(.iconOnly) & {
+        padding-left: var(--internal-button-gap);
+        justify-content: flex-start;
+    }
+
+    .iconOnly & {
+        width: 1em;
+        justify-content: center;
+    }
+}
+
+.customIconWrapper {
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+.customIcon {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+
+.icon {
+    line-height: 1;
+}
+
+.childrenContainerOuter,
+.iconContainerOuter {
+    box-sizing: content-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}

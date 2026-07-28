@@ -1,0 +1,10 @@
+@use '@src/styles/mixins' as m;
+
+.installerWrap {
+    // background-color: yellow;
+    font-size: inherit;
+}
+
+.unsupported {
+    font-size: m.px(20);
+}

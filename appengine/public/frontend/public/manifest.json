@@ -1,0 +1,27 @@
+{
+    "name": "__PROJECT_NAME__ - Takeaway",
+    "description": "A Google Cloud Experiment",
+    "author": "Google Cloud - Demos & Experiments",
+    "url": "https://prod-takeaway-__GCP_PROJECT_ID__.uc.r.appspot.com/",
+    "twitter": "@googlecloud",
+    "short_name": "__PROJECT_NAME__ - Takeaway",
+    "icons": [
+        {
+            "src": "/favicons/web-app-manifest-192x192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "maskable any"
+        },
+        {
+            "src": "/favicons/web-app-manifest-512x512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable any"
+        }
+    ],
+    "theme_color": "#000000",
+    "background_color": "#000000",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone"
+}

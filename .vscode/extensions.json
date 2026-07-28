@@ -1,0 +1,15 @@
+{
+    "recommendations": [
+        "biomejs.biome",
+        "mrmlnc.vscode-scss",
+        "hverlin.mise-vscode",
+        "github.vscode-pull-request-github",
+        "pkief.material-icon-theme",
+        "charliermarsh.ruff",
+        "ms-python.vscode-pylance",
+        "ms-python.python",
+        "ms-python.debugpy",
+        "teticio.python-envy",
+        "tamasfe.even-better-toml"
+    ]
+}

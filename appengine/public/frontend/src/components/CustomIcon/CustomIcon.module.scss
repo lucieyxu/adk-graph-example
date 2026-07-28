@@ -1,0 +1,10 @@
+.icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    user-select: none;
+    vertical-align: middle;
+    width: var(--icon-size, 32rem);
+    height: var(--icon-size, 32rem);
+}

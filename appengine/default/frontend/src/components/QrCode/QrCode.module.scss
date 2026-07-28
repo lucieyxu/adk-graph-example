@@ -1,0 +1,15 @@
+@use '@src/styles/mixins' as m;
+
+.QrCodeClickable {
+    padding: m.px(10);
+    cursor: pointer;
+
+    &:hover {
+        outline: solid m.px(5) hotpink;
+    }
+}
+
+.QrCodeStandard {
+    padding: m.px(10);
+    cursor: default;
+}

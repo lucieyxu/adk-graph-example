@@ -1,0 +1,126 @@
+{
+    "$schema": "https://biomejs.dev/schemas/2.3.11/schema.json",
+    "root": true,
+    "assist": {
+        "actions": {
+            "source": {
+                "organizeImports": "on",
+                "useSortedAttributes": "off",
+                "useSortedKeys": "off"
+            }
+        },
+        "enabled": true
+    },
+    "formatter": {
+        "attributePosition": "auto",
+        "bracketSameLine": true,
+        "bracketSpacing": true,
+        "enabled": true,
+        "expand": "auto",
+        "formatWithErrors": false,
+        "indentStyle": "space",
+        "indentWidth": 4,
+        "lineEnding": "lf",
+        "lineWidth": 100
+    },
+    "javascript": {
+        "formatter": {
+            "semicolons": "asNeeded",
+            "quoteStyle": "single",
+            "jsxQuoteStyle": "single"
+        }
+    },
+    "files": {
+        "includes": [
+            "*",
+            "**",
+            "!**/dist",
+            "!**/node_modules",
+            "!**/.next",
+            "!**/.venv",
+            "!**/public/sw.js",
+            "!**/public/workbox-*",
+            "!**/next-env.d.ts"
+        ]
+    },
+    "linter": {
+        "enabled": true,
+        "domains": {
+            "next": "recommended"
+        },
+        "rules": {
+            "a11y": {
+                "useMediaCaption": "off",
+                "noStaticElementInteractions": "off",
+                "useKeyWithClickEvents": "off"
+            },
+            "performance": {
+                "noDynamicNamespaceImportAccess": "off",
+                "noImgElement": "off"
+            },
+            "correctness": {
+                "noUnusedFunctionParameters": "error",
+                "noUnusedVariables": "error",
+                "useImportExtensions": "error",
+                "useExhaustiveDependencies": "error",
+                "useHookAtTopLevel": "error",
+                "useParseIntRadix": "off"
+            },
+            "complexity": {
+                "useLiteralKeys": "off"
+            },
+            "style": {
+                "noHeadElement": "off",
+                "noEnum": "error",
+                "useFilenamingConvention": {
+                    "level": "error",
+                    "options": {
+                        "filenameCases": ["camelCase", "export"],
+                        "match": "%?(.+?)[.](.+)",
+                        "requireAscii": true,
+                        "strictCase": false
+                    }
+                },
+                "useNamingConvention": {
+                    "level": "error",
+                    "options": {
+                        "strictCase": false
+                    }
+                }
+            },
+            "suspicious": {
+                "noDoubleEquals": "error",
+                "noExplicitAny": "error"
+            },
+            "security": {
+                "noDangerouslySetInnerHtml": "off"
+            }
+        },
+        "includes": [
+            "*",
+            "**",
+            "!**/dist",
+            "!**/node_modules",
+            "!**/.next",
+            "!**/.venv",
+            "!**/public/sw.js",
+            "!**/public/workbox-*",
+            "!**/next-env.d.ts"
+        ]
+    },
+    "overrides": [
+        {
+            "includes": ["**/*.stories.tsx", "**/*.stories.*.tsx", "**/translations/*.ts"],
+            "linter": {
+                "rules": {
+                    "style": {
+                        "useFilenamingConvention": "off"
+                    }
+                }
+            }
+        }
+    ],
+    "vcs": {
+        "enabled": false
+    }
+}

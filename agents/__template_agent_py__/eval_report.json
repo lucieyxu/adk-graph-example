@@ -1,0 +1,28 @@
+{
+  "dataset_size": 2,
+  "average_score": 0.675,
+  "results": [
+    {
+      "id": 1,
+      "input": "Explain what Google Cloud Run does in one sentence.",
+      "response": "Google Cloud Run is a fully managed compute platform for deploying and running containerized applications that automatically scales based on requests without server management.",
+      "matched_keywords": [
+        "container",
+        "run",
+        "deploy"
+      ],
+      "score": 0.75
+    },
+    {
+      "id": 2,
+      "input": "List three core databases on Google Cloud.",
+      "response": "Here are three core database services on Google Cloud:\n\n1.  **Cloud SQL**: A fully managed relational database service for MySQL, PostgreSQL, and SQL Server.\n2.  **Cloud Spanner**: A globally distributed, horizontally scalable, and strongly consistent relational database service.\n3.  **Firestore**: A flexible, scalable NoSQL document database for mobile, web, and server development.",
+      "matched_keywords": [
+        "Spanner",
+        "Cloud SQL",
+        "Firestore"
+      ],
+      "score": 0.6
+    }
+  ]
+}

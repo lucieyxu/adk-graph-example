@@ -1,0 +1,91 @@
+service: __SERVICE_NAME__
+runtime: python313
+
+default_expiration: '0'
+
+entrypoint: gunicorn -b :$PORT --worker-class=gthread --workers=3 --threads=8 --timeout=360 backend.src.main:app
+instance_class: F4
+
+inbound_services:
+  - warmup
+
+automatic_scaling:
+  min_instances: 0
+  max_instances: 3
+
+env_variables:
+  ENV: __ENV__
+  GCP_SERVICE_ACCOUNT: __APP_SERVICE_ACCOUNT__
+  GCP_PROJECT_NUMBER: __GCP_PROJECT_NUMBER__
+  GCP_PROJECT_ID: __GCP_PROJECT_ID__
+
+handlers:
+  # API routes go to backend
+  - url: /api/(.*)
+    script: auto
+    secure: always
+
+  # Next.js static assets
+  - url: /_next/(.*)
+    static_files: frontend/dist/_next/\1
+    upload: frontend/dist/_next/.*
+    secure: always
+
+  # Root page
+  - url: /
+    static_files: frontend/dist/index.html
+    upload: frontend/dist/index.html
+    secure: always
+
+  # Set text file mime types (important for Next.js to avoid full page reloads)
+  - url: /(.*\.txt)$
+    static_files: frontend/dist/\1
+    upload: frontend/dist/.*\.txt
+    mime_type: text/plain
+    secure: always
+
+  # Set json mime types (important for Next.js to avoid full page reloads)
+  - url: /(.*\.json)$
+    static_files: frontend/dist/\1
+    upload: frontend/dist/.*\.json
+    mime_type: application/json
+    secure: always
+
+  # Set css mime type
+  - url: /(.*\.css)$
+    static_files: frontend/dist/\1
+    upload: frontend/dist/.*\.css
+    mime_type: text/css
+    secure: always
+
+  # Set js mime type
+  - url: /(.*\.js)$
+    static_files: frontend/dist/\1
+    upload: frontend/dist/.*\.js
+    mime_type: text/javascript
+    secure: always
+
+  # Set woff2 mime type
+  - url: /(.*\.woff2)$
+    static_files: frontend/dist/\1
+    upload: frontend/dist/.*\.woff2
+    mime_type: font/woff2
+    secure: always
+
+  # Anything else with a dot + file extension, find the static assets as requested. 
+  - url: /(.*\..+)$
+    static_files: frontend/dist/\1
+    upload: frontend/dist/(.*\..+)$
+    secure: always
+
+  # Page request ending in a trailing slash, try to find .html file
+  - url: /(.*)/$
+    static_files: frontend/dist/\1.html
+    upload: frontend/dist/(.*)\.html
+    secure: always
+
+  # Page request not ending in a trailing slash, try to find .html file
+  - url: /(.*)
+    static_files: frontend/dist/\1.html
+    upload: frontend/dist/(.*)\.html
+    secure: always

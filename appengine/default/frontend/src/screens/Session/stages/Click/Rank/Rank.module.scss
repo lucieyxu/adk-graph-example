@@ -1,0 +1,11 @@
+@use '@src/styles/typography' as t;
+
+.rank {
+    @include t.type(header-1);
+
+}
+
+.value {
+    width: 100%;
+    text-align: center;
+}

@@ -1,0 +1,148 @@
+{
+    "version": "2.0.0",
+    "windows": {
+        "options": {
+            "shell": {
+                "executable": "cmd.exe",
+                "args": ["/d", "/c"]
+            }
+        }
+    },
+    "tasks": [
+        {
+            "type": "shell",
+            "label": "dev-appengine-default-frontend",
+            "command": "mise run dev-appengine-default-frontend",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "type": "shell",
+            "label": "dev-appengine-default-backend",
+            "command": "mise run dev-appengine-default-backend",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "type": "shell",
+            "label": "dev-appengine-default-storybook",
+            "command": "mise run dev-appengine-default-storybook",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "type": "shell",
+            "label": "dev-services-ts-example",
+            "command": "mise run dev-services-ts-example",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "type": "shell",
+            "label": "dev-services-py-example",
+            "command": "mise run dev-services-py-example",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "type": "shell",
+            "label": "dev-agents-template",
+            "command": "mise run dev-agents-template",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "type": "shell",
+            "label": "dev-appengine-public-frontend",
+            "command": "mise run dev-appengine-public-frontend",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "type": "shell",
+            "label": "dev-appengine-public-backend",
+            "command": "mise run dev-appengine-public-backend",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "type": "shell",
+            "label": "dev-appengine-public-storybook",
+            "command": "mise run dev-appengine-public-storybook",
+            "presentation": {
+                "echo": false,
+                "group": "dev",
+                "showReuseMessage": false,
+                "close": false,
+                "reveal": "always",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "dev-main",
+            "dependsOrder": "parallel",
+            "dependsOn": ["dev-appengine-default-frontend", "dev-appengine-default-backend"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "dev-appengine-public",
+            "dependsOrder": "parallel",
+            "dependsOn": ["dev-appengine-public-frontend", "dev-appengine-public-backend"],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        }
+    ]
+}

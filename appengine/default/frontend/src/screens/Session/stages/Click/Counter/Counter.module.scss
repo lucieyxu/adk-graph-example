@@ -1,0 +1,6 @@
+@use '@src/styles/typography' as t;
+
+.counter {
+    @include t.type(header-1);
+
+}

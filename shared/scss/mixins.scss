@@ -1,0 +1,11 @@
+@mixin contrast-text {
+    color: transparent;
+    -webkit-mask: linear-gradient(#000 0 0) text;
+    mask: linear-gradient(#000 0 0) text;
+    backdrop-filter: invert(1) grayscale(1) contrast(1000);
+}
+
+
+@mixin box-shadow-border($color, $width) {
+    box-shadow: 0 0 0 $width $color;
+}

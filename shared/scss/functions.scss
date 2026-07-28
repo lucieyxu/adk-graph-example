@@ -1,0 +1,60 @@
+@use 'sass:list';
+@use 'sass:map';
+@use 'sass:math';
+@use 'sass:color';
+
+/**
+ * Z-Index function
+ *
+ * @param {string} $list (Array) - The list to find the current z-index in
+ * @param {string} $element (String) - The name of the current element, must be in the $list
+ *
+ * @returns {number}
+ */
+@function zindex($list, $element) {
+    $zIndex: list.index($list, $element);
+
+    @if $zIndex {
+        @return $zIndex;
+    }
+
+    @warn 'There is no item "#{$element}" in this list; choose one of: #{$list}';
+    @return null;
+}
+
+/**
+ * This function is used to strip the unit from a number.
+ */
+@function strip-unit($number) {
+    @if math.is-unitless($number) {
+        @return $number;
+    }
+
+    @return math.div($number, ($number * 0 + 1));
+}
+
+/**
+ * Converts pixels to rems.
+ */
+@function rem($px) {
+    @return calc(strip-unit($px) / 16) * 1rem;
+}
+
+@function map-get-strict($map, $key) {
+    $value: map.get($map, $key);
+
+    @if $value {
+        @return $value;
+    }
+
+    @else {
+        @error "ERROR: Specified key \"#{$key}\" does not exist in the map. got: #{$value}";
+    }
+}
+
+/**
+ * Converts a color to RGB.
+ */
+@function toRGB($color) {
+    @return color.channel($color, 'red', rgb)+" "+color.channel($color, 'green', rgb)+" "+color.channel($color, 'blue', rgb);
+}

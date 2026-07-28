@@ -1,0 +1,111 @@
+html,
+body,
+div,
+header,
+footer,
+main,
+section,
+nav,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+img,
+svg,
+p,
+a,
+span,
+ol,
+ul,
+li,
+button,
+form,
+input,
+label {
+    margin: 0;
+    padding: 0;
+    border: none;
+    font-size: 32rem;
+    font: inherit;
+    vertical-align: baseline;
+}
+
+select {
+    font-size: 32rem;
+}
+
+option {
+    font-size: 32px; // not REM
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+img {
+    max-width: 100%;
+}
+
+svg:not(:root) {
+    overflow: hidden;
+}
+
+input {
+    border-radius: 0;
+}
+
+input[type=range] {
+    appearance: none;
+    -webkit-appearance: none;
+    border-radius: 25rem;
+    margin: 10rem 0;
+    width: 100%;
+}
+
+input[type=range]:focus {
+    outline: none;
+}
+
+input[type=range]::-webkit-slider-runnable-track {
+    width: 100%;
+    height: 12rem;
+    cursor: pointer;
+    box-shadow: 0rem 0rem 0rem #000000, 0rem 0rem 0rem #0d0d0d;
+    background: var(--grey-200);
+    border-radius: 6rem;
+    border: 0rem solid #000101;
+}
+
+input[type=range]::-webkit-slider-thumb {
+    box-shadow: 0rem 0rem 0rem #000000, 0rem 0rem 0rem #0d0d0d;
+    border: 0rem solid #000000;
+    height: 32rem;
+    width: 32rem;
+    border-radius: 16rem;
+    background: var(--blue-600);
+    cursor: pointer;
+    -webkit-appearance: none;
+    margin-top: -10rem;
+}
+
+input[type=range]:focus::-webkit-slider-runnable-track {
+    background: var(--grey-200);
+}
+
+::placeholder {
+    opacity: 1;
+}
+
+a {
+    background-color: transparent;
+
+    text-decoration: none;
+    color: inherit;
+
+    -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+    outline: none;
+}

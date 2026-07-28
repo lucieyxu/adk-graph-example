@@ -1,0 +1,22 @@
+{
+  "repositories": [
+    {
+      "name": "agents-cli",
+      "url": "https://github.com/google/agents-cli.git",
+      "branch": "main",
+      "skills": [
+        "skills/google-agents-cli-adk-code",
+        "skills/google-agents-cli-observability",
+        "skills/google-agents-cli-workflow"
+      ]
+    },
+    {
+      "name": "google-skills",
+      "url": "https://github.com/google/skills.git",
+      "branch": "main",
+      "skills": [
+        "skills/cloud/alloydb-basics"
+      ]
+    }
+  ]
+}

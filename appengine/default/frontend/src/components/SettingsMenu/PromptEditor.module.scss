@@ -1,0 +1,117 @@
+@use '@src/styles/mixins' as m;
+@use '@src/styles/typography.scss' as t;
+@use '@src/styles/variables.scss' as v;
+
+.wrapper {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: stretch;
+
+}
+
+.header {
+    flex-grow: 0;
+    padding: var(--space-2);
+    padding-bottom: var(--space-4);
+}
+
+.header h3 {
+    @include t.type(header-5);
+    margin: 0;
+}
+
+.nav {
+    flex-grow: 0;
+    // height: 120rem;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: center;
+    gap: m.px(20);
+    user-select: none;
+    padding: m.px(30) 0;
+}
+
+.description {
+    @include t.type(subheader-2);
+    padding: m.px(10) 0 m.px(10) 0;
+    opacity: 0.5;
+
+    &[data-populated="true"] {
+        // Styles applied to elements with 'data-product="red"'
+        opacity: 1;
+    }
+}
+
+.editor {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: row;
+    justify-content: stretch;
+    align-items: flex-start;
+    gap: m.px(20);
+}
+
+.subhead {
+    @include t.type(subheader-2);
+    margin-bottom: m.px(10);
+}
+
+.column {
+    display: flex;
+    flex-direction: column;
+    flex-grow: 0;
+    flex-shrink: 0;
+    width: m.px(250);
+    align-items: stretch;
+    justify-content: space-between;
+    align-self: stretch;
+}
+
+.infos {
+    // flex-grow: 1;
+    // color: blue;
+    opacity: 0.6;
+}
+
+.subPair {
+    display: flex;
+    flex-direction: row;
+    justify-content: stretch;
+
+    span {
+        padding: m.px(2) 0;
+    }
+
+    span:last-child {
+        flex-grow: 0;
+        flex-shrink: 0;
+        opacity: 0.5;
+    }
+
+    span:first-child {
+        flex-grow: 1;
+        flex-shrink: 1;
+    }
+}
+
+.prompt {
+    width: 100%;
+    align-self: stretch;
+    --md-filled-text-field-textarea-resize: none;
+}
+
+.toolbar {
+    padding-top: m.px(30);
+    padding-bottom: m.px(10);
+    flex-grow: 0;
+    height: m.px(40);
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    gap: m.px(20);
+}

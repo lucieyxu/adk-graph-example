@@ -1,0 +1,20 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "cloud_run_sentence",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "Explain what Google Cloud Run does in one sentence."}]
+      },
+      "expected_keywords": ["serverless", "container", "run", "deploy"]
+    },
+    {
+      "eval_case_id": "gcp_databases",
+      "prompt": {
+        "role": "user",
+        "parts": [{"text": "List three core databases on Google Cloud."}]
+      },
+      "expected_keywords": ["AlloyDB", "Spanner", "BigQuery", "Cloud SQL", "Firestore"]
+    }
+  ]
+}

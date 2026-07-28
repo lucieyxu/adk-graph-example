@@ -1,0 +1,78 @@
+@use '@src/styles/typography' as t;
+
+.container {
+    align-items: center;
+    background-color: var(--gray-900);
+    display: flex;
+    justify-content: center;
+    min-height: 200rem;
+    overflow: hidden;
+    position: relative;
+    width: 100%;
+}
+
+.video {
+    display: block;
+    height: auto;
+    width: 100%;
+}
+
+.mirrored .video {
+    transform: scaleX(-1);
+}
+
+// Status overlay for errors/permission denied
+.statusOverlay {
+    align-items: center;
+    color: var(--gray-400);
+    display: flex;
+    flex-direction: column;
+    gap: 12rem;
+    height: 100%;
+    justify-content: center;
+    min-height: 200rem;
+    padding: 24rem;
+    text-align: center;
+    width: 100%;
+}
+
+.statusIcon {
+    color: var(--gray-500);
+    font-size: 48rem;
+}
+
+.statusText {
+    @include t.type(header-5);
+    color: var(--gray-300);
+}
+
+.statusHint {
+    @include t.type(header-6);
+    color: var(--gray-500);
+}
+
+// Loading overlay with spinner
+.loadingOverlay {
+    align-items: center;
+    background-color: rgb(0 0 0 / 50%);
+    display: flex;
+    inset: 0;
+    justify-content: center;
+    position: absolute;
+    z-index: 10;
+}
+
+.spinner {
+    animation: spin 1s linear infinite;
+    border: 4rem solid var(--gray-600);
+    border-radius: 50%;
+    border-top-color: var(--gray-300);
+    height: 32rem;
+    width: 32rem;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}

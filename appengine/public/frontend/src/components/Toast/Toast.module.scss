@@ -1,0 +1,140 @@
+@use '@src/styles/typography' as t;
+@use '@src/styles/mixins' as m;
+
+.viewport {
+    --toast-min-width: 480rem;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    z-index: 9999;
+    min-width: var(--toast-min-width);
+
+    --internal-toast-offset: var(--toast-offset, var(--space-6));
+}
+
+.top {
+    @include m.attach-to-edge(top, var(--internal-toast-offset));
+}
+
+.top-left {
+    @include m.attach-to-edge(top-left, var(--internal-toast-offset));
+}
+
+.top-right {
+    @include m.attach-to-edge(top-right, var(--internal-toast-offset));
+}
+
+.bottom {
+    @include m.attach-to-edge(bottom, var(--internal-toast-offset));
+}
+
+.bottom-left {
+    @include m.attach-to-edge(bottom-left, var(--internal-toast-offset));
+}
+
+.bottom-right {
+    @include m.attach-to-edge(bottom-right, var(--internal-toast-offset));
+}
+
+.right {
+    @include m.attach-to-edge(right, var(--internal-toast-offset));
+}
+
+.left {
+    @include m.attach-to-edge(left, var(--internal-toast-offset));
+}
+
+
+.toast {
+    @include t.type(body);
+    position: relative;
+
+    border-radius: var(--toast-border-radius, 12rem);
+    // TODO: add box shadow variable
+    box-shadow: 0 2rem 8rem var(--md-sys-color-shadow);
+    padding: var(--space-5);
+
+    display: flex;
+    gap: var(--space-8);
+    justify-content: space-between;
+    align-items: center;
+    width: max-content;
+    max-width: calc(100vw - 32rem);
+
+    min-width: var(--toast-min-width);
+    min-height: 56rem;
+
+    z-index: 1;
+
+
+    --md-elevation-level: 3;
+}
+
+.swiping {
+    z-index: 2;
+}
+
+.info {
+    background: var(--md-sys-color-primary);
+    color: var(--md-sys-color-on-primary);
+    --action-foreground: var(--md-sys-color-primary-container);
+}
+
+.success {
+    background: var(--md-sys-color-secondary);
+    color: var(--md-sys-color-on-secondary);
+    --action-foreground: var(--md-sys-color-secondary-container);
+}
+
+.warning {
+    background: var(--md-sys-color-tertiary);
+    color: var(--md-sys-color-on-tertiary);
+    --action-foreground: var(--md-sys-color-tertiary-container);
+}
+
+.error {
+    background: var(--md-sys-color-error);
+    color: var(--md-sys-color-on-error);
+    --action-foreground: var(--md-sys-color-error-container);
+}
+
+.close {
+    --icon-size: 60rem;
+    margin: calc(-1/8 * var(--icon-size)) 0;
+}
+
+.content {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    gap: var(--space-3);
+}
+
+.title {
+    @include t.type(body-small);
+    font-weight: 600;
+    margin-right: 10rem;
+    margin-left: 5rem;
+    color: var(--md-sys-color-on-surface);
+}
+
+.description {
+    @include t.type(body-small);
+    color: var(--md-sys-color-on-surface-variant);
+}
+
+.actions {
+    display: flex;
+    gap: var(--space-6);
+
+    & button {
+        @include t.type(label);
+        background: transparent;
+        border: none;
+        color: var(--action-foreground);
+        cursor: pointer;
+        padding: 0;
+        margin: 0;
+        text-decoration: underline;
+    }
+}

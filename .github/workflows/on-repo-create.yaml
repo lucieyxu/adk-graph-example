@@ -1,0 +1,43 @@
+name: Initialize New Repository
+on:
+  create:
+  workflow_dispatch:
+
+env:
+  TEMPLATE_BRANCH: main
+  TEMPLATE_OWNER: delta-fde
+  TEMPLATE_REPOSITORY: template-agentic-starter-kit-agent
+  GH_TOKEN: ${{ secrets.TEMPLATE_SYNC_PAT }}
+
+jobs:
+  init-repo-variables:
+    if: >
+      github.repository != 'delta-fde/template-agentic-starter-kit-agent' &&
+      (github.event_name == 'workflow_dispatch' || (github.event.ref_type == 'branch' && github.event.ref == 'main'))
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout ${{ github.repository }}
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.TEMPLATE_SYNC_PAT || github.token }}
+          fetch-depth: 0
+
+      - name: Verify Sync Token Configuration
+        id: verify_token
+        run: |
+          if [ -z "${{ secrets.TEMPLATE_SYNC_PAT }}" ]; then
+            echo "::warning::TEMPLATE_SYNC_PAT secret is not configured. Downstream template autosync is bypassed."
+            echo "bypass=true" >> $GITHUB_OUTPUT
+          else
+            echo "bypass=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set Repo Variables
+        if: steps.verify_token.outputs.bypass != 'true'
+        id: set_repo_variables
+        run: |
+          TEMPLATE_SHA=$(git rev-parse HEAD)
+          gh variable set LAST_SYNCED_TEMPLATE_SHA --body "$TEMPLATE_SHA"
+          echo "Success"
+        shell: bash

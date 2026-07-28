@@ -1,0 +1,5 @@
+# This file is applied during the main build task, which spawns the app-specific build tasks
+.git/**
+**/.env
+**/node_modules/**
+**/.venv/**

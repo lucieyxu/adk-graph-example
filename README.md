@@ -1,215 +1,212 @@
-# Google Cloud Agentic AI Starter Kit
+# company-health-analyst
 
-This repository is a premium, reusable full-stack microservices template customized specifically for building and demonstrating **AI Agents** on Google Cloud. It is designed for use by the **Delta Forward Deployed Engineering (FDE)** team to build agents, test ideas, and accelerate customer engagements.
+## Use case
+This is a dummy use case where an agent is used to help a user to generate a financial report on a company using both web search and internal knowledge (mocked).
 
-## 1. Architectural Overview & Directories
+### Example End-to-End Conversation (Integration Scenario)
 
-This monorepo contains components to build, evaluate, deploy, and showcase AI Agents:
+This multi-turn scenario demonstrates intent classification, Human-in-the-Loop (HITL) parameter prompting, explanation Q&A during pauses, report generation, and parameter modification:
+
+1. **Greeting & Explanation**
+   - **User:** *"Hello, what is this tool for?"*
+   - **Agent:** Greets the user and explains that it is a company health assistant where you can enter a company name, timeframe, and region to analyze.
+2. **Initial Analysis Request & Missing Parameter Detection**
+   - **User:** *"Analyze XYZ, it was founded in 2020 by John Doe"*
+   - **Agent:** Captures the company name (`XYZ`) and founding date (`2020`), but pauses workflow execution (HITL) to request the missing region.
+3. **Conversational Question During HITL Pause**
+   - **User (HITL):** *"Remind me when was the company founded again?"*
+   - **Agent:** Routes to the explanation subagent to reply *"2020"*, then automatically re-asks for the missing region.
+4. **Historical Query During HITL Pause**
+   - **User (HITL):** *"Give me the summary of past reports on the company"*
+   - **Agent:** Routes to the explanation subagent to summarize historical reports, then automatically re-asks for the missing region.
+5. **Providing Missing Parameter & Completing Brief**
+   - **User (HITL):** *"Europe"*
+   - **Agent:** Captures `Europe` as the region. With all mandatory parameters complete (`XYZ`, `2026` (Fallback to current year), `Europe`), it pauses (HITL) asking the user for confirmation to proceed.
+6. **Confirming & Generating Report**
+   - **User (HITL):** *"ok"*
+   - **Agent:** Performs web and internal searches, cross-references findings, and generates the Markdown Company Health Report.
+7. **Post-Report Comparison Q&A**
+   - **User:** *"Compare this new report to past reports"*
+   - **Agent:** Routes to the explanation agent to compare the newly generated report against historical archives.
+8. **Modifying a Parameter**
+   - **User:** *"Change the parameter to use Asia"*
+   - **Agent:** Updates the target region in state to `Asia`, resets report completion status, and pauses (HITL) asking for confirmation.
+9. **Modifying Another Parameter**
+   - **User (HITL):** *"Also change the time span to 2025"*
+   - **Agent:** Updates the timeframe in state to `2025` and pauses (HITL) asking for confirmation.
+10. **Confirming Modified Parameters & Generating New Report**
+    - **User (HITL):** *"all good"*
+    - **Agent:** Reruns searches and synthesizes a fresh Company Health Report for `XYZ` (`Asia`, `2025`).
+
+## Project Structure
 
 ```
-├── .github/workflows/          # GitHub Actions CI/CD workflows (OIDC/Workload Identity)
-├── .agent/skills/              # Developer guides and slash command skills (create-agent)
-├── docs/                       # Monorepo guides, playbooks and documentation
-│   ├── testing/                # Local verification playbook
-│   └── agents/                 # Standalone Agents Developer Guide
-├── agents/
-│   └── __template_agent_py__/  # Standalone ADK/Reasoning Engine agent template
-├── github-sync/                # GitHub-to-GitHub sync accelerator
-├── services/
-│   ├── __template_py__/        # FastAPI Cloud Run template
-│   ├── __template_mcp_py__/    # FastMCP Model Context Protocol template
-│   └── README.md               # Cloud Run Services Developer Guide
-├── appengine/
-│   ├── default/                # Fallback full stack web client app (Next.js + Flask)
-│   └── public/                 # Social/Public static export experience
-├── shared/
-│   ├── py/                     # Shared Python components (Gemini, Logging, Skills, Auth)
-│   ├── ts/                     # Shared TypeScript API clients (Api, GenApi wrappers)
-│   └── types/                  # Shared Zod / Pydantic types (Frontend <-> Backend contracts)
-└── mise.toml                   # Root developer workflow tasks
+company-health-analyst/
+├── company_health_analyst/    # Core agent logic and FastAPI app
+│   ├── agent.py               # Package agent loader
+│   ├── subagents.py           # Declares sub-agents
+│   ├── fast_api_app.py        # Production server entrypoint
+│   ├── graph.py               # ADK 2.0 Graph Workflow topology
+│   ├── nodes.py               # Node implementations & routing logic
+│   ├── schemas.py             # Structured Pydantic data schemas
+│   ├── prompts.py             # System instructions for sub-agents
+│   ├── services.py            # Mock searches & date normalization
+│   ├── tools.py               # Strategy assistant inspection tools
+│   └── app_utils/             # Configuration & logging helpers
+├── tests/                     # Test suite
+│   ├── unit/                  # Fast offline unit tests
+│   ├── integration/           # Live end-to-end integration & replay tests
+│   └── eval/                  # Evaluation methodology & datasets
+├── app.py                     # Local ASGI application entrypoint
+├── reasoning_engine.py        # Reasoning Engine wrapper entrypoint
+├── Dockerfile                 # Container packaging definition
+└── pyproject.toml             # Project dependencies & packaging
 ```
 
----
 
-## 2. Agentic AI Starter Kit Features
+## ADK 2.0 Specificities & Graph Design Choices
 
-Our custom agent template wraps the **Google Agent Development Kit (ADK)** and extends it with built-in integrations, robust monorepo support, and multi-protocol runtime servers:
+Our workflow is built using the ADK 2.0 `Workflow` graph API (in `company_health_analyst/graph.py`), combining deterministic Python routing nodes with specialized LLM subagents. Below are the core design decisions and ADK 2.0 patterns implemented in this repository:
 
-* **📂 Out-of-the-Box Monorepo Support**: Configured to natively import, sync, and resolve shared Python code (e.g. global Secret Manager, Gemini clients, and Shared Types) from the root `/shared/` folder without complex packaging.
+### Workflow Topology Diagram
 
-* **⚡ Native Agents CLI Compatibility**: Fully compliant with the Google Agent platform spec. Scaffolded agents support all native platform commands (`agents-cli eval`, `agents-cli deploy`) out-of-the-box, as well as `agents-cli scaffold enhance` to add production infrastructure layers (like Terraform, Cloud Run deployments, or BigQuery analytics).
+```mermaid
+graph TD
+    START[START] --> classify[classify_and_route - intent_classifier_agent]
+    classify -->|generate_report| extract[extract_brief_and_validate - extractor_agent]
+    classify -->|confirm_report| confirm_run[confirm_brief_and_run_searches]
+    classify -->|ask_explanation| explain[explain_and_notify - explanation_agent]
+    classify -->|missing| prompt_missing[prompt_user_for_missing_fields - HITL]
+    classify -->|prompt_confirmation| prompt_confirm[prompt_user_for_confirmation - HITL]
+    classify -->|fallback| fb[fallback]
+    extract -->|missing| prompt_missing
+    extract -->|complete| prompt_confirm
+    prompt_missing -->|generate_report| extract
+    prompt_missing -->|classify_and_route| classify
+    prompt_confirm -->|classify_and_route| classify
+    explain --> check_status[check_brief_status]
+    check_status -->|missing| prompt_missing
+    check_status -->|prompt_confirmation| prompt_confirm
+    confirm_run -->|continue| web[run_web_search]
+    confirm_run -->|continue| internal[run_internal_search]
+    web --> join_res[join_search_results]
+    internal --> join_res
+    join_res --> format[format_search_inputs]
+    format --> synthesizer[report_synthesizer_agent - Direct Agent Node]
+    synthesizer --> save[save_report_to_db]
+```
 
-* **🧠 Dynamic Skills Manager Integration**: Pre-configured to utilize the Remote Skills Manager (`/shared/py/components/skills.py`) to clone, cache, and dynamically load system prompts and custom tools from remote Git repositories at runtime, enabling updates without code redeployments.
+### 1. Node Wrappers vs. Direct Graph Nodes
+In ADK 2.0 Workflows, you can embed an `LlmAgent` directly as a node in the graph, or wrap it inside a custom Python `@node` function. When should you use each?
 
-* **📝 Structured Cloud Logging & Observability**: Integrated with the central logger `/shared/py/components/logging.py` to automatically output structured JSON logs mapping location metadata, call stack tracebacks, and trace ID context propagation directly in Google Cloud Logging.
+- **Use a Direct Agent Node** when:
+  - **Direct input/output pass-through**: The agent consumes the output of the preceding node directly and emits text/markdown that should be streamed straight to the user or passed to the next node.
+  - **No custom logic needed**: You do not need to mutate state, perform deterministic validations, or branch graph execution based on the output.
+  - *Example*: `report_synthesizer_agent` is placed directly in `company_health_analyst/graph.py` because it receives formatted search results from `format_search_inputs` and streams the final Markdown report directly to the user.
 
-* **🔐 Secure Runtime Secret Management**: Integrates with `/shared/py/components/secrets.py` to securely load API keys, database credentials, and service passwords at runtime from Google Cloud Secret Manager using the agent's active service account credentials.
+- **Use a Node Wrapper (`@node` function wrapping an agent)** when:
+  - **Silencing subagent output**: You are using an LLM to generate structured JSON for internal decision-making (such as intent classification or parameter extraction) and want to **silence** the raw JSON output so it is not displayed in the user chat.
+  - **Executing deterministic code**: You need to run Python logic before or after the LLM call—such as cleaning input text (`_extract_text_input`), parsing structured JSON into Pydantic models, updating session state (`ctx.state`), or applying domain rules (date normalization).
+  - **Conditional routing & HITL**: You need to inspect the LLM's output to determine which graph edge to follow (`Event(route=...)`) or trigger Human-in-the-Loop interruptions (`RequestInput`).
+  - *Example*: `intent_classifier_agent` and `extractor_agent` (defined in `company_health_analyst/subagents.py`) are wrapped inside `classify_and_route` and `extract_brief_and_validate` (in `company_health_analyst/nodes.py`).
 
-* **🔗 Agent-to-Agent (A2A) Server Layer (`a2a_server.py`)**: Pre-configured Starlette-based server that exposes standard A2A endpoints (e.g. `/chat`, `/.well-known/agent-card.json`), allowing you to host the agent on Cloud Run and call it via the A2A protocol from Gemini Enterprise.
+### 2. Subagent Invocation: `run_async` vs. `ctx.run_node`
+When invoking an LLM subagent from inside a Python node wrapper, ADK 2.0 provides two execution methods. When should you use `run_async` vs. `ctx.run_node`?
 
-* **🧪 Heuristic Local Evaluation Suite (`eval.py`)**: Contains a heuristic test suite in `eval.py` to evaluate your agent's responses locally against custom JSON datasets (`/tests/eval/datasets/`) without needing to trigger remote, platform-heavy evaluation cycles.
+- **Use `subagent.run_async(inv_ctx)`** when:
+  - **Silencing output for background inspection**: You want to run the subagent programmatically in the background, inspect its output, and decide what to do without letting the subagent stream its text to the end user.
+  - **Iterative event filtering**: You want to manually iterate over events (`async for event in subagent.run_async(inv_ctx):`) to capture structured JSON (`event.output`) or yield only specific metadata (such as `usage_metadata`) while swallowing conversational tokens.
+  - *Example*: In `classify_and_route` and `extract_brief_and_validate`, we use `run_async(inv_ctx)` to evaluate JSON structured outputs for internal routing decisions while silencing the raw JSON from the user chat.
 
-* **⚙️ Integrated Workspace Automation**: Includes a local FastAPI wrapper (`app.py`) to run and query your agent locally, along with ready-to-go `pytest` and `ruff` configurations.
+- **Use `await ctx.run_node(subagent, ..., use_as_output=True)`** when:
+  - **Delegating real-time conversational streaming**: You want the child agent's streaming tokens, tool calls, and responses to be emitted directly to the user as if the wrapper node itself produced them.
+  - **Dynamic subagent scheduling**: Your Python node dynamically selects an agent to run and wants ADK's engine to manage its execution and output delegation (`use_as_output=True`).
+  - *Example*: In `explain_and_notify` (in `company_health_analyst/nodes.py`), we call `await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)` so that answers and strategy explanations are streamed directly to the user in real-time. Note that any node calling `ctx.run_node()` must be decorated with `@node(rerun_on_resume=True)` to support workflow resumability.
 
----
+### 3. Session History & Turn Retention (`include_contents`)
+We selectively configure whether subagents retain multi-turn conversation history using the `include_contents` parameter in `company_health_analyst/subagents.py`:
+- **Stateless Single-Turn Processing (Default / `none`)**: For `intent_classifier_agent`, `extractor_agent`, and `report_synthesizer_agent`, we do not set `include_contents="default"`. This ensures each extraction or classification step evaluates the prompt cleanly without being confused by previous turns, report markdown, or historical tool outputs.
+- **Multi-Turn Conversational Q&A (`include_contents="default"`)**: For `explanation_agent`, we explicitly set `include_contents="default"`. This enables the Q&A assistant to retain full session conversation history across turns, allowing the user to ask follow-up questions, compare past reports, or reference previous answers seamlessly during workflow pauses.
 
-## 3. Keeping Your Project Up-To-Date (Upstream Syncing)
+### 4. Human-in-the-Loop (HITL) & Resumability (`rerun_on_resume=True`)
+- ADK 2.0 Workflows pause for user input using `RequestInput(interrupt_id=...)` in `prompt_user_for_missing_fields` and `prompt_user_for_confirmation` (in `company_health_analyst/nodes.py`).
+- Both HITL nodes are decorated with `@node(rerun_on_resume=True)`. When execution resumes, ADK re-enters the node with the user's response in `ctx.resume_inputs[interrupt_id]`. The node increments its loop counter and routes execution forward.
 
-This starter kit includes a built-in automated sync workflow ([template-repo-sync-pr-open.yaml](.github/workflows/template-repo-sync-pr-open.yaml)) that checks for upstream template updates daily. As an individual/downstream developer, you have two options for handling updates:
+## Requirements
 
-### Option A: Opt-In (Keep Up-To-Date)
-If you want to automatically receive fixes, security patches, and features added to the base template:
-1. Generate a GitHub **Personal Access Token (PAT)** with repository access/scopes.
-2. Add the token as a repository secret named **`TEMPLATE_SYNC_PAT`** in your repository's settings under `Settings > Secrets and variables > Actions`.
-3. The workflow will run daily at 8:00 AM UTC, rebase your local commits onto the new template changes, and open a Pull Request (PR) to merge them into your `staging` branch (creating a Draft PR with conflict markers if manual resolution is needed).
+Before you begin, ensure you have:
+- **uv**: Python package manager - [Install](https://docs.astral.sh/uv/getting-started/installation/)
+- **agents-cli**: Agents CLI - Install with `uv tool install google-agents-cli`
+- **Google Cloud SDK**: For GCP services - [Install](https://cloud.google.com/sdk/docs/install)
 
-### Option B: Opt-Out (Do Nothing)
-* If you **do not** configure the `TEMPLATE_SYNC_PAT` secret, the daily sync workflow will gracefully skip its runs with a logged warning, and you will not receive any failure emails.
-* Alternatively, you can delete the workflow files ([template-repo-sync-pr-open.yaml](.github/workflows/template-repo-sync-pr-open.yaml) and [template-repo-sync-pr-close.yaml](.github/workflows/template-repo-sync-pr-close.yaml)) from your repository.
+## Quick Start
 
----
+Install and clean up the local virtual environment:
 
-## 4. Setup & Use (Quick Reference)
-
-Manage Python virtual environments and Node dependencies using `mise` and `uv` out-of-the-box.
-
-### A. Everyday Commands
-Start your day by updating tokens and local virtual environments:
 ```bash
-# Trust mise tasks
-mise trust
-
-# Sync daily tokens, check CLI status, and pull dependencies
-mise daily
-code .
-
-# Run all local linters and formatting checks
-mise run lint
-
-# Run all unit and integration tests recursively
-mise run test
+agents-cli install --clean
 ```
 
-### B. Developing Standalone Agents
-1. **Scaffold the Agent**:
-   ```bash
-   mise run scaffold-agent <agent-name>
-   ```
-   This automatically duplicates the templates, normalizes package names/placeholders, and registers tasks in `mise.toml`.
-2. **Implement & Verify**:
-   Refer to the step-by-step developer skill checklist in [.agent/skills/create-agent/SKILL.md](.agent/skills/create-agent/SKILL.md).
+Test the agent with a local playground web server:
 
-### C. Natively Running Agents CLI
-A root-level task wrapper allows you to run any `agents-cli` command natively from the root workspace directory without entering subdirectories:
 ```bash
-# Get CLI environment details
-mise run agents-cli info
-
-# Run local evaluations
-mise run agents-cli eval generate
-
-# Deploy to Vertex AI Agent Runtime (use --no-confirm-project to skip interactive prompt)
-mise run agents-cli deploy --no-confirm-project
-# Or run interactively: mise run agents-cli deploy -i
-
-# Publish to Agent Registry
-mise run agents-cli publish gemini-enterprise
+agents-cli playground
 ```
 
-#### Platform Native Enhancements (OOTB)
-Because our custom agent template is fully compliant with the Google Agent platform specs, all scaffolded agents support native enhancement commands out-of-the-box:
+## Commands
+
+| Command | Description |
+| ------- | ----------- |
+| `uv sync` | Install project dependencies |
+| `agents-cli playground` | Launch local development environment |
+| `agents-cli lint` | Run code quality checks |
+| `agents-cli eval` | Evaluate agent behavior (generate, grade, analyze, etc.) |
+| `uv run python -m pytest tests/` | Run unit and integration tests |
+| `agents-cli deploy` | Deploy agent to Agent Runtime |
+| `agents-cli publish gemini-enterprise` | Register deployed agent to Gemini Enterprise |
+
+## Development
+
+Edit your agent logic in `graph.py` (node topology), `agent.py` (serving wrapper), and subagent prompts/tools in `prompts.py` and `tools.py`. Test with `agents-cli playground` or run tests with `pytest`.
+
+## Testing
+
+The project includes both fast offline unit tests and live end-to-end integration tests.
+
+### How to Run Tests
+- **Run all tests**:
+  ```bash
+  uv run pytest tests/
+  ```
+- **Run fast unit tests (offline)**:
+  ```bash
+  uv run pytest tests/unit/
+  ```
+- **Run live integration tests**:
+  ```bash
+  uv run pytest tests/integration/
+  ```
+- **Run the 10-turn HITL integration scenario**:
+  ```bash
+  uv run pytest -s tests/integration/test_agent.py -k test_multi_turn_hitl_scenario
+  ```
+
+### What is Mocked vs. Not Mocked in Integration Tests
+- **LLM Calls (NOT Mocked)**: In the integration tests (`tests/integration/test_agent.py`), **LLM calls are not mocked**. They make live requests to `gemini-3.6-flash` via Google Cloud Vertex AI to verify real-world intent classification, extraction, and report synthesis.
+- **Environment & Auth**: Integration tests automatically load configuration from your `.env` file (such as `GOOGLE_GENAI_USE_VERTEXAI=true` and `GOOGLE_CLOUD_PROJECT`) to connect to your GCP project.
+- **Search & Data Services (Mocked)**: External web search and internal database lookups use deterministic in-memory services (`MockSearchService` and `MockInternalService`) so tests execute reliably without live web scraping or database dependencies.
+- **Workflow Replay Tests (Mocked LLMs)**: Replay tests (`tests/integration/test_workflow_replay.py`) use patched LLM events to test graph state transitions and HITL resumability deterministically without external API calls.
+
+## Deployment
+
 ```bash
-# E.g. Add Cloud Run deployment configurations or RAG datastores
-cd agents/<agent-name>
-uv run agents-cli scaffold enhance --deployment-target cloud_run
-uv run agents-cli scaffold enhance --datastore agent_platform_search
+gcloud config set project <your-project-id>
+agents-cli deploy
 ```
 
-#### Managing Workspace Developer Skills (Antigravity & Claude Code)
-To load remote developer skills (such as coding guidelines, specifications, or automation workflows from repositories like `google/agents-cli` or `google/skills`) directly into your local coding assistant:
-1. Configure your desired remote repositories and skill paths inside the root [skills.json](skills.json) file.
-2. Synchronize the local workspace skills directory by running:
-   ```bash
-   mise run sync-skills
-   ```
-   This clones/pulls the remote repository and extracts the chosen skill packages into `/skills/` at the project root, where coding assistants will automatically discover and load them.
+* To add CI/CD and Terraform, run `agents-cli scaffold enhance`.
+* To set up your production infrastructure, run `agents-cli infra cicd`.
 
-### D. Scaffold a New MCP Server
-1. Copy `/services/__template_mcp_py__` to `/services/your-mcp-service`.
-2. Rename `disabled_cloudrun.dockerfile` to `cloudrun.dockerfile` and update the `WORKDIR` path inside it to point to `/services/your-mcp-service`.
-3. Update package name in `/services/your-mcp-service/pyproject.toml`.
-4. Register the new tasks (`packages-services-your-mcp-service`, `dev-services-your-mcp-service`, `lint-services-your-mcp-service`) in the root `mise.toml`.
-5. Run `mise trust` and sync packages: `mise run packages-services-your-mcp-service`.
+## Observability
 
----
-
-## 5. CI/CD & Cloud Deployment
-
-All deployments are automated via CI/CD.
-
-### A. GitHub Actions Workflow (`deploy.yaml`)
-Continuous Integration is managed via [.github/workflows/deploy.yaml](.github/workflows/deploy.yaml):
-*   Uses **GCP Workload Identity Federation (OIDC)**. No hardcoded JSON credentials.
-*   Triggers linting checks recursively first.
-*   Deploys Standalone Agents to Vertex AI Agent Engine.
-*   Builds and deploys custom services to Cloud Run.
-
-### B. Deployment & Registration Scripts
-*   `deploy.py`: Packs packages (including `/shared`) as wheels, uploads them to Vertex AI, and outputs `deployment_metadata.json`.
-*   `register.py`: An idempotent script that registers the deployed Reasoning Engine agent as a tool inside a Gemini Enterprise assistant using Discovery Engine APIs.
-
-### C. GitHub-to-GitHub Sync Accelerator
-The workspace includes a template for setting up automated, one-way code synchronization from an internal repository to a customer-owned private repository. See [github-sync](./github-sync) for setup instructions.
-
----
-
-## 6. Viewport Sizing & Scaling (Frontend)
-
-If building user interfaces under `/appengine/default/frontend/`:
-*   The `FixedViewportProvider` forces the page to render at a fixed aspect ratio (matching Figma designs) where **`1rem` = `1px`** at target width.
-*   Aspect ratio dimensions are configured in `appengine/default/frontend/src/styles/constants.ts`.
-*   Standard typography and spacing components utilize `m.px()` functions to scale cleanly between 4K and 1080p outputs.
-
----
-
-## 7. Choosing Your Architecture: Monorepo vs. Standalone
-
-When building agents on Google Cloud, you can choose between two main development paths:
-
-### Option A: Monorepo Shared Architecture (The Starter Kit)
-* **What it is**: Multiple agents (under `/agents/`) and services (under `/services/`) reside in a single repository and share unified models, types, frontends, and utilities inside `/shared/`.
-* **When to use**: **(Recommended)** Best when you are building complex multi-agent systems, atomic agent architectures (e.g. orchestrator-worker layouts), or full-stack web applications where the frontend, backend services, and multiple agents must share common models, database schemas, API types, and configurations.
-* **Pros**:
-  * **Unified Code Reuse**: Avoid copying code for logging, environment checking, Secret Manager access, Gemini API configurations, or shared Zod/Pydantic types across your system.
-  * **Synchronized Workspaces**: A single virtual environment manager (`mise`) formats, lints, and tests the entire stack simultaneously.
-  * **Automated CI/CD**: Single GitHub workflow automatically deploys all modified agents and Cloud Run services.
-* **Cons**:
-  * **Requires custom packaging scripts**: Because the shared folder `/shared/` lives outside individual agent subdirectories, native commands like `agents-cli deploy` cannot resolve imports dynamically on GCS. You must deploy using the custom wrapper script: `mise run deploy-agent-<name>` (which internally resolves and structures the staging dependencies before upload).
-  * **Coupling**: Changing a component inside `/shared/` can affect multiple agents/frontends, requiring regression testing.
-
-### Option B: Standalone Platform Native Architecture (Full Standalone CLI)
-* **What it is**: Every agent is developed inside its own dedicated root repository created directly via `agents-cli create <name>`.
-* **When to use**: Best when you are building a single standalone agent, a quick prototype, or when your agent runs entirely independently and has no shared dependencies, database schemas, or deployment pipelines with other services in your codebase.
-* **Pros**:
-  * **100% Platform Native**: Can run all standard `agents-cli` commands (like `agents-cli deploy`) directly without any helper wrapper scripts.
-  * **Isolation**: Dependencies, packages, and code changes in one agent are entirely decoupled from other services.
-  * **Simpler setup**: Conforms exactly to standard platform samples and tutorials.
-* **Cons**:
-  * **Code Duplication**: If you have multiple agents, you have to copy-paste the secrets manager, logger, Gemini AI client, and utility tools into each agent folder manually.
-  * **Desynchronization**: Standardizing configurations, utility upgrades, and shared business logic across projects becomes difficult.
-  * **Disjointed Frontend/Backend**: If you are building a React Web App alongside your agents, they cannot easily share schema models (Zod/Pydantic) or APIs.
-
----
-
-## 8. Trunk-Based Development & Branches
-
-This project uses trunk-based development with the `staging` branch serving as the primary trunk:
-*   When starting work on a new feature, pull the latest `staging` and create a branch named `feature/your-feature-here`.
-*   You can open a draft PR for your feature right away.
-*   Once approved, squash and merge into `staging`. This will trigger a CI/CD build and deployment to the staging environment.
-*   Periodically, the lead engineer can merge `staging` into `prod` using a standard git merge to deploy releases to the production environment.
-*   Branch protections prevent direct merges into `prod` unless the source branch is `staging` and the staging deployment was successful.
-
-
-> [!NOTE]
-> This project is customized from the original [Google Cloud Demos Template](https://github.com/GoogleCloudDemos/gcdemos-26-int-demotemplate) created by the **Google Cloud Demos & Experiments** team.
+Built-in telemetry exports to Cloud Trace, BigQuery, and Cloud Logging.

@@ -1,8 +1,0 @@
-.slider {
-    /* Override the hardcoded 200px min-width, which is set by the web-component in javascript (not a css variable that can be overridden) */
-    min-inline-size: var(---slider-min-width, calc(12.5 * var(--md-base-override-size))) !important;
-}
-
-.slider :global(.label) {
-    padding: 4rem;
-}

@@ -1,6 +1,0 @@
-dispatch:
-  - url: "demosubdomain.withgoogle.com/*"
-    service: public
-
-  - url: "www.demosubdomain.withgoogle.com/*"
-    service: public

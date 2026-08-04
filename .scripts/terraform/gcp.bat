@@ -1,1 +1,0 @@
-echo This script has not been implemented for Windows. Please populate the repo template from a Mac.

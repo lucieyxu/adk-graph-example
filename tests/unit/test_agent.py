@@ -1,155 +1,128 @@
-from unittest.mock import MagicMock, patch
+import os
+from unittest.mock import AsyncMock, MagicMock
 import pytest
-from google.adk import Event
-from google.adk.agents.context import Context
 
 # Set environment variables for Vertex AI before importing workflow modules
-import os
-
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
 os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
 os.environ["GOOGLE_CLOUD_LOCATION"] = "us-central1"
 
-from company_health_analyst.schemas import CompanyBrief, ExtractorOutput
+
+from google.adk import Event
+from google.adk.agents.context import Context
+from google.adk.workflow import Workflow
+
+from company_health_analyst.graph import root_agent
 from company_health_analyst.nodes import (
-    classify_and_route,
-    extract_brief_and_validate,
-    prompt_user_for_missing_fields,
-    prompt_user_for_confirmation,
-    run_web_search,
-    run_internal_search,
     format_search_inputs,
+    route_user_request,
+    run_internal_search,
+    run_web_search,
     save_report_to_db,
-    check_brief_status,
 )
+from company_health_analyst.schemas import CompanyBrief, IntentCategory, SearchResultItem
+from company_health_analyst.subagents import explanation_agent, intake_agent
+
+
+def test_intake_agent_configuration():
+    """Verify intake_agent is configured in task mode with CompanyBrief schema."""
+    assert intake_agent.mode == "task"
+    assert intake_agent.output_schema == CompanyBrief
+    assert intake_agent.output_key == "company_brief"
+
+    # In task mode, ADK automatically injects the finish_task tool
+    tool_names = [getattr(t, "name", getattr(t, "__name__", str(t))) for t in intake_agent.tools]
+    assert "finish_task" in tool_names
+
+
+def test_workflow_graph_structure():
+    """Verify the workflow topology uses route_user_request as the entry point."""
+    assert isinstance(root_agent, Workflow)
+    assert root_agent.name == "company_health_analyst_workflow"
+
+    # Check edges exist and START connects to route_user_request
+    assert root_agent.edges is not None
+    assert len(root_agent.edges) > 0
+    assert root_agent.edges[0][0] == "START"
 
 
 @pytest.mark.asyncio
-async def test_classify_and_route_turn_1():
-    """Verify classify_and_route runs LLM classification on turn-1 incomplete brief."""
+async def test_route_user_request_pre_report_conversational():
+    """Verify route_user_request returns None when intake_agent is still conversing."""
     mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {"company_brief": {}}
-    mock_ctx.get_invocation_context.return_value = MagicMock()
+    mock_ctx.state = {"is_report_created": False}
+    mock_ctx.run_node = AsyncMock(return_value=None)
 
-    mock_agent = MagicMock()
-    mock_event = MagicMock(spec=Event)
-    mock_event.is_final_response.return_value = True
-    mock_event.output = '{"intent": "generate_report", "explanation": "New report"}'
-
-    async def mock_run_async(*args, **kwargs):
-        yield mock_event
-
-    mock_agent.run_async.side_effect = mock_run_async
-
-    with patch("company_health_analyst.nodes.intent_classifier_agent", mock_agent):
-        events = [event async for event in classify_and_route._func("Analyze XYZ", mock_ctx)]
-        result = events[-1]
-
-        assert isinstance(result, Event)
-        assert result.actions.route == "generate_report"
-        assert mock_ctx.state["original_input"] == "Analyze XYZ"
-
-
-@pytest.mark.asyncio
-async def test_classify_and_route_slow_path_confirm():
-    """Verify classify_and_route runs LLM classifier when brief is complete and user confirms."""
-    mock_ctx = MagicMock(spec=Context)
-    # Complete brief
-    mock_ctx.state = {
-        "company_brief": {"company_name": "XYZ", "time_span": "2025", "region": "Europe"}
-    }
-    mock_ctx.get_invocation_context.return_value = MagicMock()
-
-    # Mock intent_classifier_agent
-    mock_agent = MagicMock()
-    mock_event = MagicMock(spec=Event)
-    mock_event.is_final_response.return_value = True
-    mock_event.output = '{"intent": "confirm_report", "explanation": "User confirmed"}'
-
-    async def mock_run_async(*args, **kwargs):
-        yield mock_event
-
-    mock_agent.run_async.side_effect = mock_run_async
-
-    with patch("company_health_analyst.nodes.intent_classifier_agent", mock_agent):
-        events = [event async for event in classify_and_route._func("Looks good", mock_ctx)]
-        result = events[-1]
-
-        assert isinstance(result, Event)
-        assert result.actions.route == "confirm_report"
-
-
-@pytest.mark.asyncio
-async def test_extract_brief_and_validate_success():
-    """Verify extract_brief_and_validate runs extractor and merges parameters recursively."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.get_invocation_context.return_value = MagicMock()
-    # Existing state has company name
-    mock_ctx.state = {"company_brief": {"company_name": "XYZ"}}
-
-    # Mock extractor_agent output containing region & timeframe
-    mock_agent = MagicMock()
-    mock_event = MagicMock(spec=Event)
-    mock_event.is_final_response.return_value = True
-
-    extracted = ExtractorOutput(
-        company_brief=CompanyBrief(time_span="last year", region="Europe"), conflicts=[]
+    event = await route_user_request("Analyze Nike", mock_ctx)
+    assert event is None
+    mock_ctx.run_node.assert_called_once_with(
+        intake_agent, node_input="Analyze Nike", use_as_output=True
     )
-    # Serialize to dictionary so the node can parse it correctly
-    mock_event.output = extracted.model_dump()
-
-    async def mock_run_async(*args, **kwargs):
-        yield mock_event
-
-    mock_agent.run_async.side_effect = mock_run_async
-
-    with patch("company_health_analyst.nodes.extractor_agent", mock_agent):
-        events = [
-            event
-            async for event in extract_brief_and_validate._func("in Europe for last year", mock_ctx)
-        ]
-        result = events[-1]
-
-        assert isinstance(result, Event)
-        assert result.actions.route == "complete"  # All 3 fields present after merge
-
-        merged_brief = mock_ctx.state["company_brief"]
-        assert merged_brief["company_name"] == "XYZ"
-        assert merged_brief["region"] == "Europe"
-        # normalized "last year" to "2025"
-        assert merged_brief["time_span"] == "2025"
 
 
 @pytest.mark.asyncio
-async def test_prompt_user_for_missing_fields_resume():
-    """Verify prompt_user_for_missing_fields resumes directly and routes to classify_and_route."""
+async def test_route_user_request_pre_report_completed():
+    """Verify route_user_request routes to 'searches' when intake completes task."""
     mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {}
-    mock_ctx.resume_inputs = {"missing_fields_reply_0": "last year"}
+    mock_ctx.state = {"is_report_created": False}
+    completed_brief = {"company_name": "Nike", "region": "US", "time_span": "2025"}
+    mock_ctx.run_node = AsyncMock(return_value=completed_brief)
 
-    events = [event async for event in prompt_user_for_missing_fields._func(None, mock_ctx)]
-    assert len(events) == 1
-    result = events[0]
-
-    assert isinstance(result, Event)
-    assert result.actions.route == "classify_and_route"
-    assert result.actions.state_delta["original_input"] == "last year"
+    event = await route_user_request("US and 2025", mock_ctx)
+    assert isinstance(event, Event)
+    assert event.actions.route == "searches"
+    assert event.output == completed_brief
+    assert mock_ctx.state["company_brief"] == completed_brief
 
 
 @pytest.mark.asyncio
-async def test_prompt_user_for_confirmation_resume():
-    """Verify prompt_user_for_confirmation resumes and routes to classify_and_route."""
+async def test_route_user_request_post_report_explanation(monkeypatch):
+    """Verify route_user_request runs explanation_agent for analytical Q&A on existing report."""
     mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {}
-    mock_ctx.resume_inputs = {"confirmation_reply_0": "yes, go ahead"}
+    mock_ctx.state = {"is_report_created": True}
+    mock_ctx.run_node = AsyncMock(return_value=None)
 
-    events = [event async for event in prompt_user_for_confirmation._func(None, mock_ctx)]
-    assert len(events) == 1
-    result = events[0]
+    monkeypatch.setattr(
+        "company_health_analyst.nodes.classify_intent_async",
+        AsyncMock(return_value=IntentCategory.ASK_EXPLANATION),
+    )
 
-    assert isinstance(result, Event)
-    assert result.actions.route == "classify_and_route"
-    assert result.actions.state_delta["original_input"] == "yes, go ahead"
+    event = await route_user_request("explain in more details the risk factors", mock_ctx)
+    assert event is None
+    mock_ctx.run_node.assert_called_once_with(
+        explanation_agent,
+        node_input="explain in more details the risk factors",
+        use_as_output=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_route_user_request_post_report_modify(monkeypatch):
+    """Verify route_user_request resets report flag and runs intake_agent on modify."""
+    mock_ctx = MagicMock(spec=Context)
+    mock_ctx.state = {"is_report_created": True}
+    completed_brief = {"company_name": "Nike", "region": "Europe", "time_span": "2025"}
+    mock_ctx.run_node = AsyncMock(return_value=completed_brief)
+
+    monkeypatch.setattr(
+        "company_health_analyst.nodes.classify_intent_async",
+        AsyncMock(return_value=IntentCategory.MODIFY),
+    )
+
+    event = await route_user_request("change the analysis to Europe now", mock_ctx)
+    assert isinstance(event, Event)
+    assert event.actions.route == "searches"
+    assert mock_ctx.state["is_report_created"] is False
+    assert mock_ctx.state["company_brief"] == completed_brief
+
+
+def test_company_brief_schema_validation():
+    """Verify CompanyBrief requires mandatory parameters for task completion."""
+    brief = CompanyBrief(company_name="Alphabet", time_span="Q1 2026", region="US")
+    assert brief.company_name == "Alphabet"
+    assert brief.time_span == "Q1 2026"
+    assert brief.region == "US"
+    assert brief.summary is None
 
 
 def test_run_web_search():
@@ -162,7 +135,7 @@ def test_run_web_search():
     results = run_web_search(mock_ctx)
     assert len(results) >= 1
     assert "XYZ" in results[0].title
-    assert "europe" in results[0].title.lower()  # Case-insensitive check
+    assert "europe" in results[0].title.lower()
     assert results[0].source_type == "web"
 
 
@@ -184,9 +157,6 @@ def test_format_search_inputs():
     mock_ctx = MagicMock(spec=Context)
     mock_ctx.state = {}
 
-    # Predecessor outputs dict
-    from company_health_analyst.schemas import SearchResultItem
-
     node_input = {
         "run_web_search": [
             SearchResultItem(title="Web Title", snippet="Web Snippet", source_type="web")
@@ -200,9 +170,8 @@ def test_format_search_inputs():
         ],
     }
 
-    event = format_search_inputs(node_input, mock_ctx)
-    assert isinstance(event, Event)
-    text = event.output
+    text = format_search_inputs(node_input, mock_ctx)
+    assert isinstance(text, str)
 
     assert "PUBLIC WEB SEARCH RESULTS" in text
     assert "INTERNAL DATABASE SEARCH RESULTS" in text
@@ -227,13 +196,9 @@ def test_save_report_to_db():
     assert result == report_md
     assert mock_ctx.state["report_markdown"] == report_md
     assert mock_ctx.state["is_report_created"] is True
-    event = check_brief_status(mock_ctx)
-    assert event.actions.route is None
 
 
 def test_explanation_agent_config():
     """Verify explanation_agent has include_contents='default' to retain history."""
-    from company_health_analyst.subagents import explanation_agent
-
     assert explanation_agent.include_contents == "default"
     assert "include_contents" in explanation_agent.model_fields_set

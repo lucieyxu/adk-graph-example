@@ -1,4 +1,4 @@
-"""Tests for workflow replay and HITL multi-turn conversations."""
+"""Tests for workflow execution with task-mode intake agent."""
 
 from collections.abc import AsyncGenerator
 from unittest.mock import patch
@@ -7,238 +7,319 @@ import pytest
 from google.adk import Event
 from google.adk.agents import LlmAgent
 from google.adk.agents.invocation_context import InvocationContext
+from google.adk.agents.llm.task._finish_task_tool import FINISH_TASK_SUCCESS_RESULT
 from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from company_health_analyst.graph import root_agent
-from company_health_analyst.schemas import (
-    CompanyBrief,
-    ExtractorOutput,
-    IntentCategory,
-    IntentClassification,
-)
-
-
-def _make_llm_event(output_obj: object) -> Event:
-    """Helper to create a mock Event with JSON output."""
-    raw = (
-        output_obj.model_dump_json() if hasattr(output_obj, "model_dump_json") else str(output_obj)
-    )
-    return Event(
-        output=raw,
-        content=types.Content(
-            role="model",
-            parts=[types.Part.from_text(text=raw)],
-        ),
-    )
-
-
-def _make_user_response(interrupt_id: str, text: str) -> types.Content:
-    """Helper to create a user Content with FunctionResponse for HITL interrupt."""
-    return types.Content(
-        role="user",
-        parts=[
-            types.Part(
-                function_response=types.FunctionResponse(
-                    name="adk_request_input",
-                    response={"result": text},
-                    id=interrupt_id,
-                )
-            )
-        ],
-    )
+from company_health_analyst.schemas import IntentCategory
 
 
 @pytest.mark.asyncio
-async def test_workflow_modify_and_confirm_replay():
-    """Reproduces conversation where modify and confirm causes replay divergence."""
+async def test_workflow_task_mode_conversation_and_report_generation():
+    """Verifies that intake_agent has multi-turn dialog and advances only on finish_task."""
     session_service = InMemorySessionService()
-    session = session_service.create_session_sync(user_id="test_user", app_name="test_app")
+    session = await session_service.create_session(user_id="test_user", app_name="test_app")
     runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
 
-    intent_responses = [
-        _make_llm_event(
-            IntentClassification(intent=IntentCategory.GENERATE_REPORT, explanation="Turn 1")
-        ),
-        _make_llm_event(
-            IntentClassification(intent=IntentCategory.ASK_EXPLANATION, explanation="Explain")
-        ),
-        _make_llm_event(
-            IntentClassification(intent=IntentCategory.ASK_EXPLANATION, explanation="Explain")
-        ),
-        _make_llm_event(
-            IntentClassification(intent=IntentCategory.GENERATE_REPORT, explanation="Report")
-        ),
-        _make_llm_event(
-            IntentClassification(intent=IntentCategory.CONFIRM_REPORT, explanation="Confirm")
-        ),
-        _make_llm_event(
-            IntentClassification(intent=IntentCategory.ASK_EXPLANATION, explanation="Explain")
-        ),
-        _make_llm_event(IntentClassification(intent=IntentCategory.MODIFY, explanation="Modify")),
-        _make_llm_event(IntentClassification(intent=IntentCategory.MODIFY, explanation="Modify 2")),
-        _make_llm_event(
-            IntentClassification(intent=IntentCategory.CONFIRM_REPORT, explanation="Confirm 2")
-        ),
-    ]
-    intent_iter = iter(intent_responses)
-
-    extractor_responses = [
-        _make_llm_event(
-            ExtractorOutput(company_brief=CompanyBrief(company_name="XYZ"), conflicts=[])
-        ),
-        _make_llm_event(
-            ExtractorOutput(
-                company_brief=CompanyBrief(time_span="last year", region="Europe"), conflicts=[]
-            )
-        ),
-        _make_llm_event(ExtractorOutput(company_brief=CompanyBrief(region="US"), conflicts=[])),
-        _make_llm_event(ExtractorOutput(company_brief=CompanyBrief(region="Asia"), conflicts=[])),
-    ]
-    extractor_iter = iter(extractor_responses)
+    turn = 0
+    modify_called = False
 
     async def fake_run_async_impl(
         self: LlmAgent, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
-        if self.name == "intent_classifier_agent":
-            ev = next(intent_iter)
-            print("INTENT CLASSIFIER CALLED ->", ev.output)
-            yield ev
-        elif self.name == "extractor_agent":
-            yield next(extractor_iter)
+        nonlocal turn, modify_called
+        if self.name == "intake_agent":
+            if turn == 0:
+                turn += 1
+                yield Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_text(
+                                text=(
+                                    "Hello! I can help you analyze company financial health. "
+                                    "What company would you like to analyze?"
+                                )
+                            )
+                        ],
+                    )
+                )
+            elif turn == 1:
+                turn += 1
+                yield Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_text(
+                                text=(
+                                    "I have captured Alphabet. "
+                                    "What timeframe and region should I focus on?"
+                                )
+                            )
+                        ],
+                    )
+                )
+            elif not modify_called:
+                # Initial brief completion
+                fc = types.FunctionCall(
+                    name="finish_task",
+                    args={"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"},
+                    id="call_finish_task_1",
+                )
+                yield Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_text(text="Analyzing Alphabet in US for Q1 2026..."),
+                            types.Part(function_call=fc),
+                        ],
+                    )
+                )
+                fr = types.FunctionResponse(
+                    name="finish_task",
+                    response={"result": FINISH_TASK_SUCCESS_RESULT},
+                    id="call_finish_task_1",
+                )
+                yield Event(
+                    content=types.Content(
+                        role="user",
+                        parts=[types.Part(function_response=fr)],
+                    )
+                )
+            else:
+                # Modified brief completion
+                fc = types.FunctionCall(
+                    name="finish_task",
+                    args={"company_name": "Alphabet", "time_span": "Q1 2026", "region": "Europe"},
+                    id="call_finish_task_2",
+                )
+                yield Event(
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_text(
+                                text="Updating region to Europe and regenerating report..."
+                            ),
+                            types.Part(function_call=fc),
+                        ],
+                    )
+                )
+                fr = types.FunctionResponse(
+                    name="finish_task",
+                    response={"result": FINISH_TASK_SUCCESS_RESULT},
+                    id="call_finish_task_2",
+                )
+                yield Event(
+                    content=types.Content(
+                        role="user",
+                        parts=[types.Part(function_response=fr)],
+                    )
+                )
+        elif self.name == "intent_classifier_agent":
+            # Check user query in session events
+            last_user_text = ""
+            if ctx.session and ctx.session.events:
+                for ev in reversed(ctx.session.events):
+                    if ev.author == "user" and ev.content and ev.content.parts:
+                        last_user_text = "".join(p.text or "" for p in ev.content.parts)
+                        if last_user_text:
+                            break
+            if "explain" in last_user_text.lower():
+                yield Event(
+                    output={"intent": "ask_explanation", "explanation": "Explaining report"}
+                )
+            else:
+                modify_called = True
+                yield Event(
+                    output={"intent": "modify", "explanation": "Modifying report parameter"}
+                )
         elif self.name == "explanation_agent":
             yield Event(
-                output="Explanation response",
+                output=(
+                    "Detailed Risk Factors Analysis: The primary risk factors are "
+                    "regulatory antitrust compliance in the EU and data center capex."
+                ),
                 content=types.Content(
                     role="model",
-                    parts=[types.Part.from_text(text="Explanation response")],
+                    parts=[
+                        types.Part.from_text(
+                            text=(
+                                "Detailed Risk Factors Analysis: The primary risk factors are "
+                                "regulatory antitrust compliance in the EU and data center capex."
+                            )
+                        )
+                    ],
                 ),
             )
         elif self.name == "report_synthesizer_agent":
-            yield Event(
-                output="# Company Health Report for XYZ",
-                content=types.Content(
-                    role="model",
-                    parts=[types.Part.from_text(text="# Company Health Report for XYZ")],
-                ),
-            )
+            if not modify_called:
+                yield Event(
+                    output="# Comprehensive Company Health Report for Alphabet",
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_text(
+                                text="# Comprehensive Company Health Report for Alphabet"
+                            )
+                        ],
+                    ),
+                )
+            else:
+                yield Event(
+                    output="# Comprehensive Company Health Report for Alphabet in Europe",
+                    content=types.Content(
+                        role="model",
+                        parts=[
+                            types.Part.from_text(
+                                text="# Comprehensive Company Health Report for Alphabet in Europe"
+                            )
+                        ],
+                    ),
+                )
         else:
             raise ValueError(f"Unexpected LlmAgent call: {self.name}")
 
-    with patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl):
-        # Turn 1: Initial query
+    async def fake_classify_intent(query: str) -> IntentCategory:
+        nonlocal modify_called
+        if "explain" in query.lower():
+            return IntentCategory.ASK_EXPLANATION
+        modify_called = True
+        return IntentCategory.MODIFY
+
+    with (
+        patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl),
+        patch(
+            "company_health_analyst.nodes.classify_intent_async",
+            side_effect=fake_classify_intent,
+        ),
+    ):
+        # Turn 1: User greets and asks what tool is for
+
         msg1 = types.Content(
             role="user",
-            parts=[
-                types.Part.from_text(text="Analyze XYZ, the company was founded in 2000 by Mr John")
-            ],
+            parts=[types.Part.from_text(text="Hi! What can you do?")],
         )
-        list(
-            runner.run(
+        events1 = [
+            event
+            async for event in runner.run_async(
                 new_message=msg1,
                 user_id="test_user",
                 session_id=session.id,
                 run_config=RunConfig(streaming_mode=StreamingMode.SSE),
             )
+        ]
+        assert len(events1) > 0
+        has_intro = any(
+            event.content
+            and event.content.parts
+            and any("analyze company" in (p.text or "") for p in event.content.parts)
+            for event in events1
         )
+        assert has_intro
 
-        # Turn 2: Ask explanation
-        msg2 = _make_user_response("missing_fields_reply_0", "remind me when was it founded again?")
-        list(
-            runner.run(
+        # Check that the workflow has NOT run searches or created report yet
+        s1 = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        assert s1.state.get("is_report_created") is not True
+
+        # Turn 2: User provides partial information
+        msg2 = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="I want to analyze Alphabet")],
+        )
+        events2 = [
+            event
+            async for event in runner.run_async(
                 new_message=msg2,
                 user_id="test_user",
                 session_id=session.id,
                 run_config=RunConfig(streaming_mode=StreamingMode.SSE),
             )
+        ]
+        assert len(events2) > 0
+        has_followup = any(
+            event.content
+            and event.content.parts
+            and any("Alphabet" in (p.text or "") for p in event.content.parts)
+            for event in events2
         )
+        assert has_followup
 
-        # Turn 3: Ask another explanation
-        msg3 = _make_user_response("missing_fields_reply_1", "and by whom was it founded?")
-        list(
-            runner.run(
+        s2 = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        assert s2.state.get("is_report_created") is not True
+
+        # Turn 3: User provides missing timeframe and region
+        # Intake agent calls finish_task -> workflow progresses
+        msg3 = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="For Q1 2026 in US")],
+        )
+        events3 = [
+            event
+            async for event in runner.run_async(
                 new_message=msg3,
                 user_id="test_user",
                 session_id=session.id,
                 run_config=RunConfig(streaming_mode=StreamingMode.SSE),
             )
-        )
+        ]
+        assert len(events3) > 0
 
-        # Turn 4: Provide Europe
-        msg4 = _make_user_response("missing_fields_reply_2", "europe")
-        list(
-            runner.run(
+        # Turn 4: Follow-up explanation question on existing report -> routes to explanation_agent
+        msg4 = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="explain in more details the risk factors")],
+        )
+        events4 = [
+            event
+            async for event in runner.run_async(
                 new_message=msg4,
                 user_id="test_user",
                 session_id=session.id,
                 run_config=RunConfig(streaming_mode=StreamingMode.SSE),
             )
+        ]
+        assert len(events4) > 0
+        has_risk_explanation = any(
+            event.content
+            and event.content.parts
+            and any("risk factors" in (p.text or "").lower() for p in event.content.parts)
+            for event in events4
         )
+        assert has_risk_explanation
 
-        # Turn 5: Confirm report
-        msg5 = _make_user_response("confirmation_reply_0", "all good")
-        list(
-            runner.run(
+        # Turn 5: Parameter modification -> routes to intake_agent to regenerate report
+        msg5 = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="change the analysis to Europe now")],
+        )
+        events5 = [
+            event
+            async for event in runner.run_async(
                 new_message=msg5,
                 user_id="test_user",
                 session_id=session.id,
                 run_config=RunConfig(streaming_mode=StreamingMode.SSE),
             )
-        )
+        ]
+        assert len(events5) > 0
 
-        # Turn 6: Ask explanation after report
-        msg6 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="remind me when was the company founded")],
-        )
-        list(
-            runner.run(
-                new_message=msg6,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        )
-
-        # Turn 7: Modify region to US
-        msg7 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="now change the region to be US")],
-        )
-        list(
-            runner.run(
-                new_message=msg7,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        )
-
-        # Turn 8: Change mind and set asia
-        msg8 = _make_user_response("confirmation_reply_1", "asia")
-        list(
-            runner.run(
-                new_message=msg8,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        )
-
-        # Turn 9: Confirm new report after modifying parameters
-        msg9 = _make_user_response("confirmation_reply_2", "all good")
-        list(
-            runner.run(
-                new_message=msg9,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        )
-        updated_session = session_service.get_session_sync(
+        s5 = await session_service.get_session(
             app_name="test_app", user_id="test_user", session_id=session.id
         )
-        assert updated_session.state.get("is_report_created") is True
-        assert updated_session.state.get("report_markdown") == "# Company Health Report for XYZ"
+        assert s5.state.get("company_brief") == {
+            "company_name": "Alphabet",
+            "time_span": "Q1 2026",
+            "region": "Europe",
+        }
+        assert s5.state.get("is_report_created") is True
+        assert (
+            s5.state.get("report_markdown")
+            == "# Comprehensive Company Health Report for Alphabet in Europe"
+        )

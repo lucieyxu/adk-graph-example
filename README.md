@@ -72,8 +72,10 @@ The workflow is built using the ADK 2.0 `Workflow` graph API in [`company_health
 ```mermaid
 graph TD
     START[START] --> route[route_user_request]
-    route -->|searches: task completed| web[run_web_search]
-    route -->|searches: task completed| internal[run_internal_search]
+    route --> intake["intake_agent<br/>(Task Mode Intake)"]
+    intake -->|"missing mandatory fields: prompt user"| intake
+    intake -->|"searches: all mandatory fields provided"| web[run_web_search]
+    intake -->|"searches: all mandatory fields provided"| internal[run_internal_search]
     web --> join_res[join_search_results]
     internal --> join_res
     join_res --> format[format_search_inputs]

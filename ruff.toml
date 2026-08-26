@@ -2,4 +2,3 @@ line-length = 100
 lint.select = ["E", "F", "W"]
 lint.unfixable = ["F401"]
 exclude = [".venv", ".agents", ".adk"]
-

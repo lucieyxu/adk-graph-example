@@ -5,8 +5,10 @@ from typing import Any
 from google import genai
 from google.adk import Event
 from google.adk.agents.context import Context
+from google.adk.events.event_actions import EventActions
 from google.genai import types
 from pydantic import BaseModel
+
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
@@ -103,7 +105,7 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
             if res is not None:
                 brief = res.model_dump() if isinstance(res, BaseModel) else res
                 ctx.state["company_brief"] = brief
-                return Event(output=brief, route="searches")
+                return Event(output=brief, actions=EventActions(route="searches"))
             return None
         else:
             await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
@@ -113,7 +115,7 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
         if res is not None:
             brief = res.model_dump() if isinstance(res, BaseModel) else res
             ctx.state["company_brief"] = brief
-            return Event(output=brief, route="searches")
+            return Event(output=brief, actions=EventActions(route="searches"))
         return None
 
 
@@ -243,11 +245,15 @@ def save_report_to_db(node_input: Any, ctx: Context) -> str:
     """
     report_text = ""
     if isinstance(node_input, Event):
-        report_text = node_input.output or ""
+        report_text = str(node_input.output or "")
     elif isinstance(node_input, types.Content):
-        report_text = "".join(part.text for part in node_input.parts if getattr(part, "text", None))
-    elif hasattr(node_input, "parts") and getattr(node_input, "parts", None):
-        report_text = "".join(part.text for part in node_input.parts if getattr(part, "text", None))
+        parts = node_input.parts or []
+        report_text = "".join(part.text or "" for part in parts if getattr(part, "text", None))
+    elif hasattr(node_input, "parts"):
+        parts_list = getattr(node_input, "parts") or []
+        report_text = "".join(
+            getattr(part, "text", "") or "" for part in parts_list if getattr(part, "text", None)
+        )
     else:
         report_text = str(node_input)
 

@@ -189,6 +189,12 @@ agents-cli playground
 
 ## Development
 
+Install the pre-commit hook to make sure linting checks pass.
+```
+pip install pre-commit
+pre-commit install
+```
+
 Edit agent logic in [`company_health_analyst/graph.py`](company_health_analyst/graph.py) (workflow topology), [`company_health_analyst/nodes.py`](company_health_analyst/nodes.py) (routing and data nodes), [`company_health_analyst/subagents.py`](company_health_analyst/subagents.py) (subagent declarations), [`company_health_analyst/prompts.py`](company_health_analyst/prompts.py) (system instructions), and [`company_health_analyst/tools.py`](company_health_analyst/tools.py) (inspection tools). Test with `agents-cli playground` or run tests with `pytest`.
 
 ## Testing
@@ -239,4 +245,3 @@ agents-cli deploy
 ## Observability
 
 Built-in telemetry exports trace and execution metadata to Cloud Trace, BigQuery, and Cloud Logging.
-

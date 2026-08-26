@@ -124,7 +124,7 @@ def test_adk_run_sse(server_fixture: subprocess.Popen[str]) -> None:
     """Test the native ADK route (/run_sse) end to end."""
     logger.info("Starting ADK /run_sse test")
     user_id = f"user_{uuid.uuid4()}"
-    session_data = {"state": {"preferred_language": "English", "visit_count": 1}}
+    session_data: dict[str, Any] = {"state": {"preferred_language": "English", "visit_count": 1}}
 
     session_response = requests.post(
         f"{BASE_URL}/apps/company_health_analyst/users/{user_id}/sessions",
@@ -200,10 +200,14 @@ def test_a2a_chat_stream(server_fixture: subprocess.Popen[str]) -> None:
         for r in responses
         if hasattr(r.root, "result")
         and hasattr(r.root.result, "final")
-        and r.root.result.final is True
+        and getattr(r.root.result, "final", False) is True
     ]
     assert final_responses, "No final response received"
-    assert final_responses[-1].result.status.state == "completed"
+    final_res: Any = getattr(final_responses[-1], "result", None)
+    assert final_res is not None
+    status_obj: Any = getattr(final_res, "status", None)
+    assert status_obj is not None
+    assert getattr(status_obj, "state", None) == "completed"
 
 
 def test_agent_card(server_fixture: subprocess.Popen[str]) -> None:
@@ -218,7 +222,7 @@ def test_agent_card(server_fixture: subprocess.Popen[str]) -> None:
 
 def test_collect_feedback(server_fixture: subprocess.Popen[str]) -> None:
     """Test the feedback collection endpoint (/feedback)."""
-    feedback_data = {
+    feedback_data: dict[str, Any] = {
         "score": 4,
         "user_id": "test-user-456",
         "session_id": "test-session-456",

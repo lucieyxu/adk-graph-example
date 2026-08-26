@@ -1,18 +1,17 @@
 from enum import Enum
-from typing import Optional
 from pydantic import BaseModel, Field
 
 
 class CompanyBrief(BaseModel):
-    company_name: Optional[str] = Field(None, description="Name of the company to analyze.")
-    time_span: Optional[str] = Field(
-        None, description="Target analysis timeframe (e.g., 'last year', 'Q2 2026')."
+    company_name: str = Field(description="Name of the company to analyze.")
+    time_span: str = Field(
+        description="Target analysis timeframe (e.g., 'last year', 'Q2 2026', 'FY2025')."
     )
-    region: Optional[str] = Field(
-        None, description="Target geographical focus/region (e.g., 'US', 'Europe')."
+    region: str = Field(
+        description="Target geographical focus/region (e.g., 'US', 'Europe', 'Global')."
     )
-    summary: Optional[str] = Field(
-        None, description="Natural language summary of the analysis request."
+    summary: str | None = Field(
+        default=None, description="Natural language summary of the analysis request."
     )
 
 
@@ -39,5 +38,5 @@ class IntentClassification(BaseModel):
 class SearchResultItem(BaseModel):
     title: str
     snippet: str
-    url: Optional[str] = None
+    url: str | None = None
     source_type: str  # 'web' or 'internal'

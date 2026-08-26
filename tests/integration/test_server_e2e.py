@@ -25,16 +25,8 @@ from typing import Any
 
 import pytest
 import requests
-from a2a.types import (
-    Message,
-    MessageSendParams,
-    Part,
-    Role,
-    SendStreamingMessageRequest,
-    SendStreamingMessageResponse,
-    TextPart,
-)
 from requests.exceptions import RequestException
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -166,48 +158,45 @@ def test_a2a_chat_stream(server_fixture: subprocess.Popen[str]) -> None:
     """Test the A2A route using the JSON-RPC streaming protocol."""
     logger.info("Starting A2A chat stream test")
 
-    message = Message(
-        message_id=f"msg-user-{uuid.uuid4()}",
-        role=Role.user,
-        parts=[Part(root=TextPart(text="Hi!"))],
-    )
-    request = SendStreamingMessageRequest(
-        id="test-req-001",
-        params=MessageSendParams(message=message),
-    )
+    request_data: dict[str, Any] = {
+        "id": "test-req-001",
+        "params": {
+            "message": {
+                "message_id": f"msg-user-{uuid.uuid4()}",
+                "role": "user",
+                "parts": [{"text": "Hi!"}],
+            }
+        },
+    }
     response = requests.post(
         A2A_RPC_URL,
         headers=HEADERS,
-        json=request.model_dump(mode="json", exclude_none=True),
+        json=request_data,
         stream=True,
         timeout=60,
     )
     assert response.status_code == 200
 
-    responses: list[SendStreamingMessageResponse] = []
+    responses: list[dict[str, Any]] = []
     for line in response.iter_lines():
         if line:
             line_str = line.decode("utf-8")
             if line_str.startswith("data: "):
-                responses.append(
-                    SendStreamingMessageResponse.model_validate(json.loads(line_str[6:]))
-                )
+                responses.append(json.loads(line_str[6:]))
 
     assert responses, "No responses received from stream"
 
     final_responses = [
-        r.root
+        r
         for r in responses
-        if hasattr(r.root, "result")
-        and hasattr(r.root.result, "final")
-        and getattr(r.root.result, "final", False) is True
+        if isinstance(r.get("result"), dict) and r["result"].get("final") is True
     ]
     assert final_responses, "No final response received"
-    final_res: Any = getattr(final_responses[-1], "result", None)
-    assert final_res is not None
-    status_obj: Any = getattr(final_res, "status", None)
-    assert status_obj is not None
-    assert getattr(status_obj, "state", None) == "completed"
+    final_res = final_responses[-1].get("result")
+    assert isinstance(final_res, dict)
+    status_obj = final_res.get("status")
+    assert isinstance(status_obj, dict)
+    assert status_obj.get("state") == "completed"
 
 
 def test_agent_card(server_fixture: subprocess.Popen[str]) -> None:

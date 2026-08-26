@@ -43,4 +43,10 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.mypy]
 ignore_missing_imports = true
 python_version = "3.13"
+exclude = ["^tests/"]
 
+
+[[tool.mypy.overrides]]
+module = "a2a.*"
+ignore_missing_imports = true
+follow_untyped_imports = true

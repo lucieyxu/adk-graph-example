@@ -18,7 +18,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from company_health_analyst.agent import root_agent
+from company_health_analyst.agent import app
 
 load_dotenv()
 
@@ -31,7 +31,7 @@ def test_agent_stream() -> None:
     session_service = InMemorySessionService()
 
     session = session_service.create_session_sync(user_id="test_user", app_name="test")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test")
+    runner = Runner(app=app, session_service=session_service, app_name="test")
 
     message = types.Content(
         role="user",
@@ -73,7 +73,7 @@ def test_multi_turn_task_mode_scenario() -> None:
     """
     session_service = InMemorySessionService()
     session = session_service.create_session_sync(user_id="test_user", app_name="test_app")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
+    runner = Runner(app=app, session_service=session_service, app_name="test_app")
 
     turns = [
         # 1. Greeting & Explanation
@@ -118,6 +118,7 @@ def test_multi_turn_task_mode_scenario() -> None:
             s6 = session_service.get_session_sync(
                 app_name="test_app", user_id="test_user", session_id=session.id
             )
+            assert s6 is not None
             assert s6.state.get("is_report_created") is True
             brief6 = s6.state.get("company_brief", {})
             assert brief6.get("company_name") == "XYZ"
@@ -128,6 +129,7 @@ def test_multi_turn_task_mode_scenario() -> None:
     final_session = session_service.get_session_sync(
         app_name="test_app", user_id="test_user", session_id=session.id
     )
+    assert final_session is not None
     assert final_session.state.get("is_report_created") is True
     final_brief = final_session.state.get("company_brief", {})
     assert final_brief.get("company_name") == "XYZ"

@@ -29,7 +29,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # 3. Optional: Run tests to ensure no regressions
-uv run python -m pytest tests/test_agent.py
+uv run python -m pytest tests/unit/test_agent.py
 if [ $? -ne 0 ]; then
     echo ""
     echo "❌ Unit tests failed."

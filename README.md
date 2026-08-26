@@ -83,7 +83,7 @@ graph TD
 
 ### 1. Autonomous Task-Mode Intake Subagent (`mode="task"`)
 
-Instead of managing conversational elicitation and parameter verification through manual state-machine loops, the intake workflow is encapsulated within [`intake_agent`](company_health_analyst/subagents.py) using ADK Task Mode:
+Instead of managing conversational elicitation and parameter verification through manual state-machine loops, the intake workflow is encapsulated within [`intake_agent`](company_health_analyst/subagents.py) using ADK Task Mode. The downstream components of the graph will not be run until the goal of this task is achieved:
 
 - **Configuration**: [`intake_agent`](company_health_analyst/subagents.py) is declared with `mode="task"`, `output_schema=CompanyBrief`, and `output_key="company_brief"`.
 - **Autonomous Multi-Turn Elicitation**: The agent conducts multi-turn conversation directly with the user. It answers greeting questions, provides service capabilities, and looks up historical context using [`fetch_report_context`](company_health_analyst/tools.py) and [`search_previous_reports`](company_health_analyst/tools.py).
@@ -91,7 +91,7 @@ Instead of managing conversational elicitation and parameter verification throug
 
 ### 2. Dynamic Ingress Routing Gateway (`route_user_request`)
 
-The [`route_user_request`](company_health_analyst/nodes.py) node serves as the single ingress routing gateway connected from `START`:
+The [`route_user_request`](company_health_analyst/nodes.py) node serves as the single ingress routing gateway connected from `START`. This is necessary to allow the user flexibility to start with a new report or ask about past reports, and to ask about explanations or change a report once it is generated:
 
 - **Pre-Report Lifecycle (`is_report_created = False`)**:
   - Delegates execution to [`intake_agent`](company_health_analyst/subagents.py) via `await ctx.run_node(intake_agent, node_input=query, use_as_output=True)`.
@@ -104,7 +104,7 @@ The [`route_user_request`](company_health_analyst/nodes.py) node serves as the s
 
 ### 3. FunctionNode Configuration: `FunctionNode(rerun_on_resume=True)` vs. `@node(rerun_on_resume=True)`
 
-ADK 2.0 provides two ways to wrap Python functions with workflow orchestration options (such as `rerun_on_resume=True`):
+ADK 2.0 provides two ways to wrap Python functions with workflow orchestration options (such as `rerun_on_resume=True` Human In The Loop HITL):
 
 - **Explicit `FunctionNode(func=..., rerun_on_resume=True)` (Used in this repository)**:
   - **Separation of Concerns**: Kept in [`company_health_analyst/graph.py`](company_health_analyst/graph.py) as topology definition, keeping [`route_user_request`](company_health_analyst/nodes.py) in [`company_health_analyst/nodes.py`](company_health_analyst/nodes.py) as a pure, undecorated async function.

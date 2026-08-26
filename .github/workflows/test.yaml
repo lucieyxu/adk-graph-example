@@ -1,0 +1,43 @@
+name: Run Tests on PR
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
+
+      - name: Check code formatting (ruff)
+        run: uv run ruff format --check .
+
+      - name: Check linting (ruff)
+        run: uv run ruff check .
+
+      - name: Check type hints (mypy)
+        run: uv run mypy .
+
+      - name: Run unit & workflow replay tests
+        env:
+          GOOGLE_GENAI_USE_VERTEXAI: "1"
+          GOOGLE_CLOUD_PROJECT: "test-project"
+          GOOGLE_CLOUD_LOCATION: "us-central1"
+        run: uv run pytest tests/unit tests/integration/test_workflow_replay.py -v

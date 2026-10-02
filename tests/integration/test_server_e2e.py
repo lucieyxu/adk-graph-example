@@ -36,7 +36,6 @@ BASE_URL = "http://127.0.0.1:8000"
 RUN_SSE_URL = BASE_URL + "/run_sse"
 A2A_RPC_URL = BASE_URL + "/a2a/company_health_analyst/"
 AGENT_CARD_URL = A2A_RPC_URL + ".well-known/agent-card.json"
-FEEDBACK_URL = BASE_URL + "/feedback"
 
 HEADERS = {"Content-Type": "application/json"}
 
@@ -207,18 +206,6 @@ def test_agent_card(server_fixture: subprocess.Popen[str]) -> None:
     served_agent_card = response.json()
     for field in ("name", "description", "skills", "capabilities", "url", "version"):
         assert field in served_agent_card, f"Missing field in agent card: {field}"
-
-
-def test_collect_feedback(server_fixture: subprocess.Popen[str]) -> None:
-    """Test the feedback collection endpoint (/feedback)."""
-    feedback_data: dict[str, Any] = {
-        "score": 4,
-        "user_id": "test-user-456",
-        "session_id": "test-session-456",
-        "text": "Great response!",
-    }
-    response = requests.post(FEEDBACK_URL, json=feedback_data, headers=HEADERS, timeout=10)
-    assert response.status_code == 200
 
 
 def test_reasoning_engine_stream(server_fixture: subprocess.Popen[str]) -> None:

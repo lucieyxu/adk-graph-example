@@ -164,15 +164,18 @@ Ensure you have the following prerequisites installed:
 ## Quick Start
 
 Install project dependencies and clean the local environment:
-
 ```bash
-agents-cli install --clean
+uv run agents-cli install --clean
 ```
 
-Launch the local development playground web server:
+Upgrade agent-cli
+````bash
+uv run agents-cli upgrade
+````
 
+Launch the local development playground web server:
 ```bash
-agents-cli playground
+uv run agents-cli playground --port 8081 --host 0.0.0.0
 ```
 
 ## Commands

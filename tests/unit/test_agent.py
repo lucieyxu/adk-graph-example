@@ -1,5 +1,6 @@
 import os
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 # Set environment variables for Vertex AI before importing workflow modules
@@ -56,7 +57,7 @@ async def test_route_user_request_pre_report_conversational():
     event = await route_user_request("Analyze Nike", mock_ctx)
     assert event is None
     mock_ctx.run_node.assert_called_once_with(
-        intake_agent, node_input="Analyze Nike", use_as_output=True
+        intake_agent, node_input="Analyze Nike", use_as_output=True, run_id="intake_cycle_1"
     )
 
 
@@ -114,6 +115,36 @@ async def test_route_user_request_post_report_modify(monkeypatch):
     assert event.actions.route == "searches"
     assert mock_ctx.state["is_report_created"] is False
     assert mock_ctx.state["company_brief"] == completed_brief
+    mock_ctx.run_node.assert_called_once_with(
+        intake_agent,
+        node_input="change the analysis to Europe now",
+        use_as_output=True,
+        run_id="intake_cycle_2",
+    )
+
+
+@pytest.mark.asyncio
+async def test_route_user_request_multiple_modify_cycles(monkeypatch):
+    """Verify route_user_request increments intake_cycle across repeated modifications."""
+    mock_ctx = MagicMock(spec=Context)
+    mock_ctx.state = {"is_report_created": True, "intake_cycle": 2}
+    completed_brief = {"company_name": "Nike", "region": "Asia", "time_span": "2026"}
+    mock_ctx.run_node = AsyncMock(return_value=completed_brief)
+
+    monkeypatch.setattr(
+        "company_health_analyst.nodes.classify_intent_async",
+        AsyncMock(return_value=IntentCategory.MODIFY),
+    )
+
+    event = await route_user_request("change the analysis to Asia now", mock_ctx)
+    assert isinstance(event, Event)
+    assert mock_ctx.state["intake_cycle"] == 3
+    mock_ctx.run_node.assert_called_once_with(
+        intake_agent,
+        node_input="change the analysis to Asia now",
+        use_as_output=True,
+        run_id="intake_cycle_3",
+    )
 
 
 def test_company_brief_schema_validation():

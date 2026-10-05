@@ -309,6 +309,16 @@ async def test_workflow_task_mode_conversation_and_report_generation():
             )
         ]
         assert len(events5) > 0
+        has_modify_content = any(
+            event.content
+            and event.content.parts
+            and any(
+                bool(getattr(p, "text", None)) or bool(getattr(p, "function_call", None))
+                for p in event.content.parts
+            )
+            for event in events5
+        )
+        assert has_modify_content, "Turn 5 produced no model text or function calls."
 
         s5 = await session_service.get_session(
             app_name="test_app", user_id="test_user", session_id=session.id

@@ -8,8 +8,6 @@ from google.adk.agents.context import Context
 from google.adk.events.event_actions import EventActions
 from google.genai import types
 from pydantic import BaseModel
-
-
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from company_health_analyst.app_utils.config import AGENT_MODEL
@@ -101,7 +99,14 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
         logger.info("Classified post-report intent as: %s for query: '%s'", intent, query)
         if intent in (IntentCategory.GENERATE_REPORT, IntentCategory.MODIFY):
             ctx.state["is_report_created"] = False
-            res = await ctx.run_node(intake_agent, node_input=query, use_as_output=True)
+            # Needed for task mode to treat a fresh cycle when modification happens
+            # after an analysis has already run
+            intake_cycle = ctx.state.get("intake_cycle", 1) + 1
+            ctx.state["intake_cycle"] = intake_cycle
+            run_id = f"intake_cycle_{intake_cycle}"
+            res = await ctx.run_node(
+                intake_agent, node_input=query, use_as_output=True, run_id=run_id
+            )
             if res is not None:
                 brief = res.model_dump() if isinstance(res, BaseModel) else res
                 ctx.state["company_brief"] = brief
@@ -111,7 +116,9 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
             await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
             return None
     else:
-        res = await ctx.run_node(intake_agent, node_input=query, use_as_output=True)
+        intake_cycle = ctx.state.get("intake_cycle", 1)
+        run_id = f"intake_cycle_{intake_cycle}"
+        res = await ctx.run_node(intake_agent, node_input=query, use_as_output=True, run_id=run_id)
         if res is not None:
             brief = res.model_dump() if isinstance(res, BaseModel) else res
             ctx.state["company_brief"] = brief

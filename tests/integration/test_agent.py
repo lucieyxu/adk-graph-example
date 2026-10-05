@@ -113,6 +113,30 @@ def test_multi_turn_task_mode_scenario() -> None:
         )
         assert len(events) > 0, f"Expected events on Turn {i}"
 
+        # Hardened check 1: Fail immediately if any event reported an error_code
+        for event in events:
+            assert getattr(event, "error_code", None) is None, (
+                f"Turn {i} ('{user_text}') failed with error_code={event.error_code}: "
+                f"{getattr(event, 'error_message', '')}"
+            )
+
+        # Hardened check 2: Fail immediately if the turn produced no model text or tool calls
+        # (catches silent drops and empty STOP responses under StreamingMode.SSE)
+        has_model_content = any(
+            event.content
+            and event.content.parts
+            and any(
+                bool(getattr(p, "text", None)) or bool(getattr(p, "function_call", None))
+                for p in event.content.parts
+            )
+            for event in events
+        )
+        assert has_model_content, (
+            f"Turn {i} ('{user_text}') produced no model text or tool calls "
+            f"(silent empty response). "
+            f"Emitted event actions: {[getattr(e, 'actions', None) for e in events]}"
+        )
+
         # Verification after initial report generation (Turn 6)
         if i == 6:
             s6 = session_service.get_session_sync(

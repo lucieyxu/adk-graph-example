@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
     from google.adk.agents import BaseAgent
     from google.adk.runners import Runner
+    from google.adk.workflow import Workflow
 
 # URI advertised on the agent card describing the executor extension shipped
 # by ADK. Kept as a module-level constant so callers can override or extend
@@ -107,7 +108,7 @@ def _resolve_app_url(app_url: str | None) -> str:
 async def attach_a2a_routes(
     app: FastAPI,
     *,
-    agent: BaseAgent,
+    agent: BaseAgent | Workflow,
     runner: Runner,
     task_store: TaskStore,
     rpc_path: str,

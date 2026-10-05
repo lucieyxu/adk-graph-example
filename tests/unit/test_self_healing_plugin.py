@@ -41,14 +41,14 @@ def test_plugin_registered_on_adk_app() -> None:
     assert plugin.throw_exception_if_retry_exceeded is False
 
 
-def test_intake_agent_prompt_negative_instruction_constraints() -> None:
-    """Verifies that PromptTemplate.INTAKE_AGENT contains explicit negative constraints."""
+def test_intake_agent_prompt_configuration() -> None:
+    """Verifies that PromptTemplate.INTAKE_AGENT specifies parameters and task guidelines."""
     prompt = PromptTemplate.INTAKE_AGENT
-    assert "CRITICAL TOOL CALLING RULES:" in prompt
-    assert "readLine" in prompt
-    assert "input" in prompt
-    assert "ask_user" in prompt
-    assert "conversational text" in prompt
+    assert "company_name" in prompt
+    assert "time_span" in prompt
+    assert "region" in prompt
+    assert "finish_task" in prompt
+    assert "Conversational Behavior" in prompt
 
 
 @pytest.mark.asyncio

@@ -11,4 +11,4 @@ GCP_PROJECT_ID = (
 
 GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 
-AGENT_MODEL = os.getenv("AGENT_MODEL", "gemini-3.6-flash")
+AGENT_MODEL = os.getenv("AGENT_MODEL", "gemini-3.8-flash")

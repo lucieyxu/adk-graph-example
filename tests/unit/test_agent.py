@@ -22,6 +22,7 @@ from company_health_analyst.nodes import (
     save_report_to_db,
     validate_intake_node,
 )
+from company_health_analyst.prompts import PromptTemplate
 from company_health_analyst.schemas import (
     CompanyBrief,
     IntakeValidationResponse,
@@ -303,3 +304,13 @@ def test_explanation_agent_config():
     """Verify explanation_agent has include_contents='default' to retain history."""
     assert explanation_agent.include_contents == "default"
     assert "include_contents" in explanation_agent.model_fields_set
+
+
+def test_explanation_agent_prompt_constraints():
+    """Verify PromptTemplate.EXPLANATION_AGENT enforces anti-greeting and direct-answering rules."""
+    prompt = PromptTemplate.EXPLANATION_AGENT
+    assert "Do NOT greet" in prompt
+    assert "ongoing" in prompt
+    assert "search_previous_reports" in prompt
+    assert "fetch_report_context" in prompt
+    assert "Direct Answering" in prompt

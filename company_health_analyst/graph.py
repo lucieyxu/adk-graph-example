@@ -7,6 +7,7 @@ from company_health_analyst.nodes import (
     run_internal_search,
     run_web_search,
     save_report_to_db,
+    validate_intake_node,
 )
 from company_health_analyst.subagents import (
     report_synthesizer_agent,
@@ -25,6 +26,12 @@ root_agent = Workflow(
         ("START", route_user_node),
         (
             route_user_node,
+            {
+                "validate_intake": validate_intake_node,
+            },
+        ),
+        (
+            validate_intake_node,
             {
                 "searches": (run_web_search, run_internal_search),
             },

@@ -255,7 +255,7 @@ async def test_workflow_task_mode_conversation_and_report_generation():
         assert s2.state.get("is_report_created") is not True
 
         # Turn 3: User provides missing timeframe and region
-        # Intake agent calls finish_task -> workflow progresses
+        # Intake agent calls finish_task -> workflow halts at validate_intake_node
         msg3 = types.Content(
             role="user",
             parts=[types.Part.from_text(text="For Q1 2026 in US")],
@@ -270,6 +270,56 @@ async def test_workflow_task_mode_conversation_and_report_generation():
             )
         ]
         assert len(events3) > 0
+
+        # Verify HITL validation request is emitted and report is NOT created yet
+        has_hitl_request = any(
+            event.content
+            and event.content.parts
+            and any(
+                getattr(p, "function_call", None) is not None
+                and p.function_call.id == "validate_captured_brief_1"
+                for p in event.content.parts
+            )
+            for event in events3
+        )
+        assert has_hitl_request, "Expected HITL validation interrupt request on Turn 3."
+
+        s3_pre = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        assert s3_pre.state.get("is_report_created") is not True
+
+        # Turn 3b: Human confirms captured brief -> workflow resumes and generates report
+        hitl_fr = types.FunctionResponse(
+            name="adk_request_input",
+            response={
+                "approved": True,
+                "company_name": "Alphabet",
+                "time_span": "Q1 2026",
+                "region": "US",
+            },
+            id="validate_captured_brief_1",
+        )
+        msg3b = types.Content(role="user", parts=[types.Part(function_response=hitl_fr)])
+        events3b = [
+            event
+            async for event in runner.run_async(
+                new_message=msg3b,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events3b) > 0
+
+        s3_post = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        assert s3_post.state.get("is_report_created") is True
+        assert (
+            s3_post.state.get("report_markdown")
+            == "# Comprehensive Company Health Report for Alphabet"
+        )
 
         # Turn 4: Follow-up explanation question on existing report -> routes to explanation_agent
         msg4 = types.Content(
@@ -294,7 +344,7 @@ async def test_workflow_task_mode_conversation_and_report_generation():
         )
         assert has_risk_explanation
 
-        # Turn 5: Parameter modification -> routes to intake_agent to regenerate report
+        # Turn 5: Modification -> routes to intake_agent then halts at validate_intake_node
         msg5 = types.Content(
             role="user",
             parts=[types.Part.from_text(text="change the analysis to Europe now")],
@@ -309,16 +359,40 @@ async def test_workflow_task_mode_conversation_and_report_generation():
             )
         ]
         assert len(events5) > 0
-        has_modify_content = any(
+        has_modify_hitl = any(
             event.content
             and event.content.parts
             and any(
-                bool(getattr(p, "text", None)) or bool(getattr(p, "function_call", None))
+                getattr(p, "function_call", None) is not None
+                and p.function_call.id == "validate_captured_brief_2"
                 for p in event.content.parts
             )
             for event in events5
         )
-        assert has_modify_content, "Turn 5 produced no model text or function calls."
+        assert has_modify_hitl, "Expected HITL validation interrupt on Turn 5 modification."
+
+        # Turn 5b: Human confirms modified brief -> workflow resumes and regenerates report
+        hitl_fr5 = types.FunctionResponse(
+            name="adk_request_input",
+            response={
+                "approved": True,
+                "company_name": "Alphabet",
+                "time_span": "Q1 2026",
+                "region": "Europe",
+            },
+            id="validate_captured_brief_2",
+        )
+        msg5b = types.Content(role="user", parts=[types.Part(function_response=hitl_fr5)])
+        events5b = [
+            event
+            async for event in runner.run_async(
+                new_message=msg5b,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events5b) > 0
 
         s5 = await session_service.get_session(
             app_name="test_app", user_id="test_user", session_id=session.id
@@ -327,9 +401,226 @@ async def test_workflow_task_mode_conversation_and_report_generation():
             "company_name": "Alphabet",
             "time_span": "Q1 2026",
             "region": "Europe",
+            "summary": None,
         }
         assert s5.state.get("is_report_created") is True
         assert (
             s5.state.get("report_markdown")
             == "# Comprehensive Company Health Report for Alphabet in Europe"
+        )
+
+
+@pytest.mark.asyncio
+async def test_workflow_hitl_validation_with_field_edits():
+    """Verifies that human can correct/override parameters during the HITL validation step."""
+    session_service = InMemorySessionService()
+    session = await session_service.create_session(user_id="test_user", app_name="test_app")
+    runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
+
+    async def fake_run_async_impl(
+        self: LlmAgent, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        if self.name == "intake_agent":
+            # Initial brief completion with US
+            fc = types.FunctionCall(
+                name="finish_task",
+                args={"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"},
+                id="call_finish_task_1",
+            )
+            yield Event(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_text(text="Captured Alphabet in US..."),
+                        types.Part(function_call=fc),
+                    ],
+                )
+            )
+            fr = types.FunctionResponse(
+                name="finish_task",
+                response={"result": FINISH_TASK_SUCCESS_RESULT},
+                id="call_finish_task_1",
+            )
+            yield Event(
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(function_response=fr)],
+                )
+            )
+        elif self.name == "report_synthesizer_agent":
+            yield Event(
+                output="# Comprehensive Company Health Report for Alphabet in Asia",
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_text(
+                            text="# Comprehensive Company Health Report for Alphabet in Asia"
+                        )
+                    ],
+                ),
+            )
+        else:
+            raise ValueError(f"Unexpected LlmAgent call: {self.name}")
+
+    with patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl):
+        # Step 1: Intake captures parameters
+        msg1 = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="Analyze Alphabet for Q1 2026 in US")],
+        )
+        events1 = [
+            event
+            async for event in runner.run_async(
+                new_message=msg1,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events1) > 0
+
+        # Step 2: Human overrides region from US to Asia during HITL validation
+        hitl_edit_fr = types.FunctionResponse(
+            name="adk_request_input",
+            response={
+                "approved": True,
+                "company_name": "Alphabet",
+                "time_span": "Q1 2026",
+                "region": "Asia",
+            },
+            id="validate_captured_brief_1",
+        )
+        msg2 = types.Content(role="user", parts=[types.Part(function_response=hitl_edit_fr)])
+        events2 = [
+            event
+            async for event in runner.run_async(
+                new_message=msg2,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events2) > 0
+
+        s_final = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        assert s_final.state.get("company_brief") == {
+            "company_name": "Alphabet",
+            "time_span": "Q1 2026",
+            "region": "Asia",
+            "summary": None,
+        }
+        assert s_final.state.get("is_report_created") is True
+        assert (
+            s_final.state.get("report_markdown")
+            == "# Comprehensive Company Health Report for Alphabet in Asia"
+        )
+
+
+@pytest.mark.asyncio
+async def test_workflow_hitl_validation_with_blank_form_submission():
+    """Verifies that submitting blank form (nulls) retains the captured parameters."""
+    session_service = InMemorySessionService()
+    session = await session_service.create_session(user_id="test_user", app_name="test_app")
+    runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
+
+    async def fake_run_async_impl(
+        self: LlmAgent, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        if self.name == "intake_agent":
+            fc = types.FunctionCall(
+                name="finish_task",
+                args={"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"},
+                id="call_finish_task_1",
+            )
+            yield Event(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_text(text="Captured Alphabet in US..."),
+                        types.Part(function_call=fc),
+                    ],
+                )
+            )
+            fr = types.FunctionResponse(
+                name="finish_task",
+                response={"result": FINISH_TASK_SUCCESS_RESULT},
+                id="call_finish_task_1",
+            )
+            yield Event(
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(function_response=fr)],
+                )
+            )
+        elif self.name == "report_synthesizer_agent":
+            yield Event(
+                output="# Comprehensive Company Health Report for Alphabet",
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_text(
+                            text="# Comprehensive Company Health Report for Alphabet"
+                        )
+                    ],
+                ),
+            )
+        else:
+            raise ValueError(f"Unexpected LlmAgent call: {self.name}")
+
+    with patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl):
+        # Step 1: Intake captures parameters
+        msg1 = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="Analyze Alphabet for Q1 2026 in US")],
+        )
+        events1 = [
+            event
+            async for event in runner.run_async(
+                new_message=msg1,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events1) > 0
+
+        # Step 2: Human submits form blank (UI sends nulls for empty text fields)
+        hitl_blank_fr = types.FunctionResponse(
+            name="adk_request_input",
+            response={
+                "approved": True,
+                "company_name": None,
+                "time_span": None,
+                "region": None,
+                "summary": None,
+            },
+            id="validate_captured_brief_1",
+        )
+        msg2 = types.Content(role="user", parts=[types.Part(function_response=hitl_blank_fr)])
+        events2 = [
+            event
+            async for event in runner.run_async(
+                new_message=msg2,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events2) > 0
+
+        s_final = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        assert s_final.state.get("company_brief") == {
+            "company_name": "Alphabet",
+            "time_span": "Q1 2026",
+            "region": "US",
+            "summary": None,
+        }
+        assert s_final.state.get("is_report_created") is True
+        assert (
+            s_final.state.get("report_markdown")
+            == "# Comprehensive Company Health Report for Alphabet"
         )

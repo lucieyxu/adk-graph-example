@@ -1,4 +1,5 @@
 from enum import Enum
+
 from pydantic import BaseModel, Field
 
 
@@ -12,6 +13,30 @@ class CompanyBrief(BaseModel):
     )
     summary: str | None = Field(
         default=None, description="Natural language summary of the analysis request."
+    )
+
+
+class IntakeValidationResponse(BaseModel):
+    """User response when validating captured intake parameters."""
+
+    company_name: str | None = Field(
+        default=None,
+        description="Name of the company to analyze (leave blank to keep captured value).",
+    )
+    time_span: str | None = Field(
+        default=None,
+        description="Target analysis timeframe (leave blank to keep captured value).",
+    )
+    region: str | None = Field(
+        default=None,
+        description="Target geographical focus/region (leave blank to keep captured value).",
+    )
+    summary: str | None = Field(
+        default=None, description="Natural language summary of the analysis request."
+    )
+    approved: bool = Field(
+        default=True,
+        description="Whether the captured parameters are confirmed by the human.",
     )
 
 

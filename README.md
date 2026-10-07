@@ -74,8 +74,11 @@ graph TD
     START[START] --> route[route_user_request]
     route --> intake["intake_agent<br/>(Task Mode Intake)"]
     intake -->|"missing mandatory fields: prompt user"| intake
-    intake -->|"searches: all mandatory fields provided"| web[run_web_search]
-    intake -->|"searches: all mandatory fields provided"| internal[run_internal_search]
+    intake -->|"validate_intake: all mandatory fields provided"| hitl[validate_intake_node<br/>Human-in-the-Loop Validation]
+    hitl -.->|"RequestInput: user review/edits"| user[User Confirmation Form]
+    user -.->|"Resume with confirmed brief"| hitl
+    hitl -->|"searches: confirmed"| web[run_web_search]
+    hitl -->|"searches: confirmed"| internal[run_internal_search]
     web --> join_res[join_search_results]
     internal --> join_res
     join_res --> format[format_search_inputs]
@@ -83,28 +86,48 @@ graph TD
     synthesizer --> save[save_report_to_db]
 ```
 
-### 1. Autonomous Task-Mode Intake Subagent (`mode="task"`)
+### 1. Autonomous Task-Mode Intake Subagent (`mode="task"`) & Dynamic Run IDs
 
 Instead of managing conversational elicitation and parameter verification through manual state-machine loops, the intake workflow is encapsulated within [`intake_agent`](company_health_analyst/subagents.py) using ADK Task Mode. The downstream components of the graph will not be run until the goal of this task is achieved:
 
 - **Configuration**: [`intake_agent`](company_health_analyst/subagents.py) is declared with `mode="task"`, `output_schema=CompanyBrief`, and `output_key="company_brief"`.
 - **Autonomous Multi-Turn Elicitation**: The agent conducts multi-turn conversation directly with the user. It answers greeting questions, provides service capabilities, and looks up historical context using [`fetch_report_context`](company_health_analyst/tools.py) and [`search_previous_reports`](company_health_analyst/tools.py).
 - **Goal Completion via `finish_task`**: When all required fields (`company_name`, `time_span`, `region`) in [`CompanyBrief`](company_health_analyst/schemas.py) are collected and verified, [`intake_agent`](company_health_analyst/subagents.py) invokes the built-in `finish_task` tool. This produces the structured output that resolves the task and advances graph execution.
+- **Dynamic Intake Cycle Run IDs (`run_id=f"intake_cycle_{intake_cycle}"`)**:
+  - In ADK 2.0, a task-mode agent tracks its completion lifecycle per `run_id`.
+  - Once a task-mode agent completes via `finish_task`, subsequent invocations with the same `run_id` will reuse the terminal completed state.
+  - To support post-report parameter modifications (e.g. *"Change region to Asia"* after a report is already created), [`route_user_request`](company_health_analyst/nodes.py) increments `ctx.state["intake_cycle"]` and executes `ctx.run_node(intake_agent, run_id=f"intake_cycle_{intake_cycle}")`.
+  - Scoping each intake session to a fresh `run_id` allows the agent to start a new task elicitation lifecycle cleanly without being short-circuited by previous task completions.
 
-### 2. Dynamic Ingress Routing Gateway (`route_user_request`)
+### 2. Human-in-the-Loop (HITL) Validation Node & Dynamic Interrupt IDs
+
+Before launching heavy computational searches and report synthesis, the workflow intercepts the captured brief with [`validate_intake_node`](company_health_analyst/nodes.py) to provide human oversight and parameter confirmation:
+
+- **Role of `validate_intake_node`**:
+  - Sits directly after [`route_user_request`](company_health_analyst/nodes.py) on the `"validate_intake"` route.
+  - Formats a human-readable summary of the captured parameters (`company_name`, `time_span`, `region`, `summary`) and yields a [`RequestInput`](company_health_analyst/nodes.py) event.
+  - The ADK Web UI renders an interactive validation form with [`IntakeValidationResponse`](company_health_analyst/schemas.py).
+  - Users can click **Submit** to confirm parameters as-is (blank fields retain captured values) or type into specific fields to override parameters before search execution.
+- **Why Dynamic Interrupt IDs Are Critical (`interrupt_id=f"validate_captured_brief_{intake_cycle}"`)**:
+  - In ADK 2.0, user responses to `RequestInput` are recorded into session state keyed by `interrupt_id` and made available in `ctx.resume_inputs`.
+  - If a static `interrupt_id` (e.g., `"validate_captured_brief"`) were reused across multiple cycles, subsequent modification runs would find the old response from cycle 1 already present in `ctx.resume_inputs`.
+  - This would cause [`validate_intake_node`](company_health_analyst/nodes.py) to assume the current interrupt was already resolved, skipping the HITL confirmation step and immediately executing searches with stale parameters.
+  - Generating dynamic, cycle-scoped IDs (`validate_captured_brief_1`, `validate_captured_brief_2`, etc.) guarantees that every new modification triggers a fresh `RequestInput` in the UI and requires explicit human validation.
+
+### 3. Dynamic Ingress Routing Gateway (`route_user_request`)
 
 The [`route_user_request`](company_health_analyst/nodes.py) node serves as the single ingress routing gateway connected from `START`. This is necessary to allow the user flexibility to start with a new report or ask about past reports, and to ask about explanations or change a report once it is generated:
 
 - **Pre-Report Lifecycle (`is_report_created = False`)**:
-  - Delegates execution to [`intake_agent`](company_health_analyst/subagents.py) via `await ctx.run_node(intake_agent, node_input=query, use_as_output=True)`.
+  - Delegates execution to [`intake_agent`](company_health_analyst/subagents.py) via `await ctx.run_node(intake_agent, node_input=query, use_as_output=True, run_id=run_id)`.
   - While conversational intake is in progress, `ctx.run_node` returns `None`, streaming tokens directly to the user and concluding the turn without advancing downstream edges.
-  - When [`intake_agent`](company_health_analyst/subagents.py) calls `finish_task`, `ctx.run_node` returns the validated [`CompanyBrief`](company_health_analyst/schemas.py). The router saves the brief into `ctx.state["company_brief"]` and returns `Event(output=brief, route="searches")` to trigger the downstream pipeline.
+  - When [`intake_agent`](company_health_analyst/subagents.py) calls `finish_task`, `ctx.run_node` returns the validated [`CompanyBrief`](company_health_analyst/schemas.py). The router saves the brief into `ctx.state["company_brief"]` and returns `Event(output=brief, route="validate_intake")` to trigger the validation node.
 - **Post-Report Lifecycle (`is_report_created = True`)**:
   - Classifies the user's intent using [`classify_intent_async`](company_health_analyst/nodes.py).
-  - For parameter modifications or new analyses (`IntentCategory.GENERATE_REPORT`, `IntentCategory.MODIFY`), it resets `ctx.state["is_report_created"] = False` and routes to [`intake_agent`](company_health_analyst/subagents.py).
+  - For parameter modifications or new analyses (`IntentCategory.GENERATE_REPORT`, `IntentCategory.MODIFY`), it resets `ctx.state["is_report_created"] = False`, increments `intake_cycle`, and routes to [`intake_agent`](company_health_analyst/subagents.py) under the new cycle ID.
   - For informational or strategic deep-dives (`IntentCategory.ASK_EXPLANATION`), it executes [`explanation_agent`](company_health_analyst/subagents.py) with session history and context inspection tools.
 
-### 3. FunctionNode Configuration: `FunctionNode(rerun_on_resume=True)` vs. `@node(rerun_on_resume=True)`
+### 4. FunctionNode Configuration: `FunctionNode(rerun_on_resume=True)` vs. `@node(rerun_on_resume=True)`
 
 ADK 2.0 provides two ways to wrap Python functions with workflow orchestration options (such as `rerun_on_resume=True` Human In The Loop HITL):
 
@@ -122,17 +145,17 @@ ADK 2.0 provides two ways to wrap Python functions with workflow orchestration o
   - When `rerun_on_resume=False` (default for standard function nodes), resuming a session bypasses the node and treats the incoming user reply as the node's completed output.
   - When `rerun_on_resume=True`, the ADK workflow engine re-executes the node function upon session resume, making it mandatory for nodes that dynamically schedule child subagents using `await ctx.run_node(...)`.
 
-### 4. Direct Graph Nodes vs. Parallel Pipeline Fan-out
+### 5. Direct Graph Nodes vs. Parallel Pipeline Fan-out
 
 - **Direct Agent Nodes**: [`report_synthesizer_agent`](company_health_analyst/subagents.py) is wired directly into the graph topology between [`format_search_inputs`](company_health_analyst/nodes.py) and [`save_report_to_db`](company_health_analyst/nodes.py). It consumes formatted search results and streams the final Markdown report directly.
 - **Deterministic Parallel Fan-out & Join**: [`run_web_search`](company_health_analyst/nodes.py) and [`run_internal_search`](company_health_analyst/nodes.py) execute concurrently, fan in to `JoinNode` in [`company_health_analyst/graph.py`](company_health_analyst/graph.py), and pass aggregated data to [`format_search_inputs`](company_health_analyst/nodes.py) for prompt construction.
 
-### 5. Session History & Turn Retention (`include_contents`)
+### 6. Session History & Turn Retention (`include_contents`)
 
 - **Multi-Turn Conversational Q&A (`include_contents="default"`)**: [`explanation_agent`](company_health_analyst/subagents.py) explicitly sets `include_contents="default"`. This enables the Q&A assistant to retain full session history, allowing users to ask follow-up questions, compare against past reports, and drill into specific findings seamlessly.
 - **Stateless Node Processing**: [`report_synthesizer_agent`](company_health_analyst/subagents.py) operates statelessly on its node input, avoiding unnecessary context overhead.
 
-### 6. Out-of-Band Intent Classification (`client.aio.models` vs. `ctx.run_node`)
+### 7. Out-of-Band Intent Classification (`client.aio.models` vs. `ctx.run_node`)
 
 In [`company_health_analyst/nodes.py`](company_health_analyst/nodes.py), the post-report router classifies user intent using direct async calls to [`client.aio.models.generate_content`](company_health_analyst/nodes.py) rather than executing an agent via `ctx.run_node` or `run_async`:
 
@@ -141,7 +164,7 @@ In [`company_health_analyst/nodes.py`](company_health_analyst/nodes.py), the pos
 - **Granular Retry Resilience**: Direct client calls are decorated with `tenacity.retry` with exponential backoff, handling transient quota or network errors at the function boundary without triggering graph node re-entry.
 - **Reduced Execution Overhead**: A single-shot structured JSON classification with `response_schema=IntentClassification` avoids the overhead of instantiating subagent invocation contexts, lifecycle hooks, and tool registries.
 
-### 7. Subagent Invocation Patterns: `ctx.run_node` vs. `agent.run_async`
+### 8. Subagent Invocation Patterns: `ctx.run_node` vs. `agent.run_async`
 
 When invoking subagents from custom Python workflow nodes, ADK 2.0 provides two execution paradigms depending on output delegation and lifecycle management:
 

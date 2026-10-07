@@ -20,9 +20,16 @@ from company_health_analyst.nodes import (
     run_internal_search,
     run_web_search,
     save_report_to_db,
+    validate_intake_node,
 )
-from company_health_analyst.schemas import CompanyBrief, IntentCategory, SearchResultItem
+from company_health_analyst.schemas import (
+    CompanyBrief,
+    IntakeValidationResponse,
+    IntentCategory,
+    SearchResultItem,
+)
 from company_health_analyst.subagents import explanation_agent, intake_agent
+from google.adk.events.request_input import RequestInput
 
 
 def test_intake_agent_configuration():
@@ -63,7 +70,7 @@ async def test_route_user_request_pre_report_conversational():
 
 @pytest.mark.asyncio
 async def test_route_user_request_pre_report_completed():
-    """Verify route_user_request routes to 'searches' when intake completes task."""
+    """Verify route_user_request routes to 'validate_intake' when intake completes task."""
     mock_ctx = MagicMock(spec=Context)
     mock_ctx.state = {"is_report_created": False}
     completed_brief = {"company_name": "Nike", "region": "US", "time_span": "2025"}
@@ -71,9 +78,72 @@ async def test_route_user_request_pre_report_completed():
 
     event = await route_user_request("US and 2025", mock_ctx)
     assert isinstance(event, Event)
-    assert event.actions.route == "searches"
+    assert event.actions.route == "validate_intake"
     assert event.output == completed_brief
     assert mock_ctx.state["company_brief"] == completed_brief
+
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_interrupts_when_not_resumed():
+    """Verify validate_intake_node yields RequestInput if no resume input exists."""
+    mock_ctx = MagicMock(spec=Context)
+    mock_ctx.resume_inputs = {}
+    mock_ctx.state = {
+        "company_brief": {"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"}
+    }
+
+    req = await validate_intake_node._func(None, mock_ctx)
+    assert isinstance(req, RequestInput)
+    assert req.interrupt_id == "validate_captured_brief_1"
+    assert req.response_schema == IntakeValidationResponse
+    assert "Alphabet" in req.message
+
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_resumes_and_routes_searches():
+    """Verify validate_intake_node routes to 'searches' and updates state on resume."""
+    mock_ctx = MagicMock(spec=Context)
+    mock_ctx.state = {
+        "company_brief": {"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"}
+    }
+    mock_ctx.resume_inputs = {
+        "validate_captured_brief_1": {
+            "approved": True,
+            "company_name": "Alphabet",
+            "time_span": "Q1 2026",
+            "region": "Europe",
+        }
+    }
+
+    event = await validate_intake_node._func(None, mock_ctx)
+    assert isinstance(event, Event)
+    assert event.actions.route == "searches"
+    assert mock_ctx.state["company_brief"]["region"] == "Europe"
+
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_resumes_with_blank_form_preserves_captured():
+    """Verify validate_intake_node preserves captured brief when form submitted blank (nulls)."""
+    mock_ctx = MagicMock(spec=Context)
+    mock_ctx.state = {
+        "company_brief": {"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"}
+    }
+    mock_ctx.resume_inputs = {
+        "validate_captured_brief_1": {
+            "approved": True,
+            "company_name": None,
+            "time_span": None,
+            "region": None,
+            "summary": None,
+        }
+    }
+
+    event = await validate_intake_node._func(None, mock_ctx)
+    assert isinstance(event, Event)
+    assert event.actions.route == "searches"
+    assert mock_ctx.state["company_brief"]["company_name"] == "Alphabet"
+    assert mock_ctx.state["company_brief"]["time_span"] == "Q1 2026"
+    assert mock_ctx.state["company_brief"]["region"] == "US"
 
 
 @pytest.mark.asyncio
@@ -112,7 +182,7 @@ async def test_route_user_request_post_report_modify(monkeypatch):
 
     event = await route_user_request("change the analysis to Europe now", mock_ctx)
     assert isinstance(event, Event)
-    assert event.actions.route == "searches"
+    assert event.actions.route == "validate_intake"
     assert mock_ctx.state["is_report_created"] is False
     assert mock_ctx.state["company_brief"] == completed_brief
     mock_ctx.run_node.assert_called_once_with(

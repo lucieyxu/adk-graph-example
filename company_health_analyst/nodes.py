@@ -6,6 +6,8 @@ from google import genai
 from google.adk import Event
 from google.adk.agents.context import Context
 from google.adk.events.event_actions import EventActions
+from google.adk.events.request_input import RequestInput
+from google.adk.workflow import node
 from google.genai import types
 from pydantic import BaseModel
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -13,6 +15,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from company_health_analyst.app_utils.config import AGENT_MODEL
 from company_health_analyst.prompts import PromptTemplate
 from company_health_analyst.schemas import (
+    IntakeValidationResponse,
     IntentCategory,
     IntentClassification,
     SearchResultItem,
@@ -76,14 +79,14 @@ async def classify_intent_async(query: str) -> IntentCategory:
 
 
 async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
-    """Routes incoming user requests to subagents and triggers searches on task completion.
+    """Routes incoming user requests to subagents and triggers validation on task completion.
 
     Args:
         node_input: The incoming user message from START.
         ctx: The ADK workflow context.
 
     Returns:
-        Event with route='searches' and output=CompanyBrief when intake completes its task,
+        Event with route='validate_intake' and output=CompanyBrief when intake completes its task,
         or None when the turn is conversational and awaiting further user input.
     """
     is_report_created = ctx.state.get("is_report_created", False)
@@ -110,7 +113,7 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
             if res is not None:
                 brief = res.model_dump() if isinstance(res, BaseModel) else res
                 ctx.state["company_brief"] = brief
-                return Event(output=brief, actions=EventActions(route="searches"))
+                return Event(output=brief, actions=EventActions(route="validate_intake"))
             return None
         else:
             await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
@@ -122,8 +125,69 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
         if res is not None:
             brief = res.model_dump() if isinstance(res, BaseModel) else res
             ctx.state["company_brief"] = brief
-            return Event(output=brief, actions=EventActions(route="searches"))
+            return Event(output=brief, actions=EventActions(route="validate_intake"))
         return None
+
+
+@node(name="validate_intake_node", rerun_on_resume=True)
+async def validate_intake_node(node_input: Any, ctx: Context) -> Event | RequestInput | None:
+    """Validates captured company brief with human-in-the-loop before searches begin.
+
+    Args:
+        node_input: The output from the intake agent (CompanyBrief or dict).
+        ctx: The ADK workflow context.
+
+    Returns:
+        RequestInput when awaiting human approval/edits, or Event with route='searches'
+        and validated output upon confirmation.
+    """
+    brief_data = ctx.state.get("company_brief") or node_input or {}
+    if isinstance(brief_data, BaseModel):
+        brief_data = brief_data.model_dump()
+
+    intake_cycle = ctx.state.get("intake_cycle", 1)
+    interrupt_id = f"validate_captured_brief_{intake_cycle}"
+
+    # Step 1: Interrupt if human input is not yet received
+    if not ctx.resume_inputs or interrupt_id not in ctx.resume_inputs:
+        company_name = brief_data.get("company_name", "")
+        time_span = brief_data.get("time_span", "")
+        region = brief_data.get("region", "")
+        msg = (
+            "Please review and confirm the captured company parameters before analysis begins:\n"
+            f"- Company Name: {company_name}\n"
+            f"- Timeframe: {time_span}\n"
+            f"- Region: {region}"
+        )
+        return RequestInput(
+            interrupt_id=interrupt_id,
+            message=msg,
+            payload=brief_data,
+            response_schema=IntakeValidationResponse,
+        )
+
+    # Step 2: Resume with human validation input
+    resume_data = ctx.resume_inputs[interrupt_id]
+    if isinstance(resume_data, IntakeValidationResponse):
+        validated = resume_data
+    elif isinstance(resume_data, dict):
+        # Filter out empty or null values so blank form fields in the UI
+        # do not overwrite the captured parameters from intake.
+        overrides = {
+            k: v
+            for k, v in resume_data.items()
+            if v is not None and (not isinstance(v, str) or v.strip() != "")
+        }
+        merged = {**brief_data, **overrides}
+        validated = IntakeValidationResponse(**merged)
+    else:
+        validated = IntakeValidationResponse(**brief_data)
+
+    confirmed_brief = validated.model_dump(exclude={"approved"})
+    ctx.state["company_brief"] = confirmed_brief
+    logger.info("Intake validated by human: %s", confirmed_brief)
+
+    return Event(output=confirmed_brief, actions=EventActions(route="searches"))
 
 
 def _extract_text_input(node_input: Any, ctx: Context) -> str:

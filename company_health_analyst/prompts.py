@@ -45,7 +45,8 @@ it into one of these intents:
 3. generate_report: The user is starting a brand new request or providing values to fill
    parameters (e.g. "Analyze Nike", "Europe and last year", "XYZ, in Europe").
 4. ask_explanation: The user is asking an analytical, strategic, or informational question
-   about the current generated report, asking to deep dive into findings (e.g. "explain in more
+   about the company brief, uploaded document, company history, past reports, or current
+   generated report (e.g. "when was the company founded and by who?", "explain in more
    details the risk factors", "why is revenue down?", "compare with past reports"), or asking
    general questions about the company or capabilities.
 5. fallback: Any query that is completely unrelated, spam, or out-of-scope.
@@ -64,7 +65,8 @@ Instructions:
 1. Parse the conversation history and extract the fields.
 2. STRICT GROUNDING: Do NOT assume, guess, or extrapolate. If the user does not specify
    a field, set it to null.
-3. If there are contradictions or conflicting values for a field, list them in conflicts.
+3. If there are contradictions or conflicting values for a field, list them in conflicts,
+   do not infer them.
 4. Provide a brief conversational summary in the 'summary' field of what has been captured.
 
 Output strictly valid JSON matching the ExtractorOutput schema.

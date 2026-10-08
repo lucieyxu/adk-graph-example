@@ -6,11 +6,12 @@ import pytest
 # Set environment variables for Vertex AI before importing workflow modules
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
 os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
-os.environ["GOOGLE_CLOUD_LOCATION"] = "us-central1"
+os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 
 
 from google.adk import Event
 from google.adk.agents.context import Context
+from google.adk.events.request_input import RequestInput
 from google.adk.workflow import Workflow
 
 from company_health_analyst.graph import root_agent
@@ -30,7 +31,6 @@ from company_health_analyst.schemas import (
     SearchResultItem,
 )
 from company_health_analyst.subagents import explanation_agent, intake_agent
-from google.adk.events.request_input import RequestInput
 
 
 def test_intake_agent_configuration():
@@ -314,3 +314,69 @@ def test_explanation_agent_prompt_constraints():
     assert "search_previous_reports" in prompt
     assert "fetch_report_context" in prompt
     assert "Direct Answering" in prompt
+
+
+@pytest.mark.asyncio
+async def test_route_user_request_pre_report_hitl_question_routes_to_explanation(monkeypatch):
+    """Verify asking questions when company_brief exists routes to explanation_agent."""
+    mock_ctx = MagicMock(spec=Context)
+    mock_ctx.state = {
+        "is_report_created": False,
+        "company_brief": {"company_name": "XYZ", "time_span": "FY2025", "region": "Global"},
+    }
+    mock_ctx.run_node = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(
+        "company_health_analyst.nodes.classify_intent_async",
+        AsyncMock(return_value=IntentCategory.ASK_EXPLANATION),
+    )
+
+    event = await route_user_request("When was the company founded and by who?", mock_ctx)
+    assert event is None
+    mock_ctx.run_node.assert_called_once_with(
+        explanation_agent,
+        node_input="When was the company founded and by who?",
+        use_as_output=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_route_user_request_pre_report_chat_confirm(monkeypatch):
+    """Verify user confirming via chat when company_brief exists routes to validate_intake."""
+    mock_ctx = MagicMock(spec=Context)
+    mock_ctx.state = {
+        "is_report_created": False,
+        "company_brief": {"company_name": "XYZ", "time_span": "FY2025", "region": "Global"},
+    }
+
+    monkeypatch.setattr(
+        "company_health_analyst.nodes.classify_intent_async",
+        AsyncMock(return_value=IntentCategory.CONFIRM_REPORT),
+    )
+
+    event = await route_user_request("looks good, proceed", mock_ctx)
+    assert isinstance(event, Event)
+    assert event.actions.route == "validate_intake"
+    assert mock_ctx.state["intake_confirmed_by_chat"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_chat_confirmed_skips_interrupt():
+    """Verify validate_intake_node routes to searches without interrupting when chat-confirmed."""
+    mock_ctx = MagicMock(spec=Context)
+    mock_ctx.resume_inputs = {}
+    mock_ctx.state = {
+        "company_brief": {"company_name": "XYZ", "time_span": "FY2025", "region": "Global"},
+        "intake_confirmed_by_chat": True,
+    }
+
+    event = await validate_intake_node._func(None, mock_ctx)
+    assert isinstance(event, Event)
+    assert event.actions.route == "searches"
+    assert event.output == {
+        "company_name": "XYZ",
+        "time_span": "FY2025",
+        "region": "Global",
+        "summary": None,
+    }
+    assert mock_ctx.state["intake_confirmed_by_chat"] is False

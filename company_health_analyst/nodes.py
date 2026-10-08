@@ -12,7 +12,7 @@ from google.genai import types
 from pydantic import BaseModel
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from company_health_analyst.app_utils.config import AGENT_MODEL
+from company_health_analyst.app_utils.config import AGENT_MODEL, GCP_LOCATION, GCP_PROJECT_ID
 from company_health_analyst.prompts import PromptTemplate
 from company_health_analyst.schemas import (
     IntakeValidationResponse,
@@ -38,7 +38,11 @@ def _get_genai_client() -> genai.Client:
     """Returns a singleton genai.Client initialized from environment ADC."""
     global _genai_client
     if _genai_client is None:
-        _genai_client = genai.Client()
+        _genai_client = genai.Client(
+            vertexai=True,
+            project=GCP_PROJECT_ID or None,
+            location=GCP_LOCATION or None,
+        )
     return _genai_client
 
 
@@ -46,7 +50,7 @@ def _get_genai_client() -> genai.Client:
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
     retry=retry_if_exception_type(Exception),
-    reraise=False,
+    reraise=True,
 )
 async def classify_intent_async(query: str) -> IntentCategory:
     """Classifies user query intent using Vertex AI without mutating session event history.
@@ -90,20 +94,27 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
         or None when the turn is conversational and awaiting further user input.
     """
     is_report_created = ctx.state.get("is_report_created", False)
+    has_brief = bool(ctx.state.get("company_brief"))
     query = _extract_text_input(node_input, ctx)
 
-    if is_report_created:
+    if is_report_created or has_brief:
         try:
             intent = await classify_intent_async(query)
         except Exception as exc:
             logger.warning("Intent classification failed: %s. Falling back to explanation.", exc)
             intent = IntentCategory.FALLBACK
 
-        logger.info("Classified post-report intent as: %s for query: '%s'", intent, query)
+        logger.info(
+            "Classified intent as: %s for query: '%s' (is_report_created=%s, has_brief=%s)",
+            intent,
+            query,
+            is_report_created,
+            has_brief,
+        )
         if intent in (IntentCategory.GENERATE_REPORT, IntentCategory.MODIFY):
             ctx.state["is_report_created"] = False
             # Needed for task mode to treat a fresh cycle when modification happens
-            # after an analysis has already run
+            # after an analysis has already run or after initial parameters were captured
             intake_cycle = ctx.state.get("intake_cycle", 1) + 1
             ctx.state["intake_cycle"] = intake_cycle
             run_id = f"intake_cycle_{intake_cycle}"
@@ -115,6 +126,14 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
                 ctx.state["company_brief"] = brief
                 return Event(output=brief, actions=EventActions(route="validate_intake"))
             return None
+        elif intent == IntentCategory.CONFIRM_REPORT:
+            if not is_report_created:
+                ctx.state["intake_confirmed_by_chat"] = True
+                brief = ctx.state.get("company_brief", {})
+                return Event(output=brief, actions=EventActions(route="validate_intake"))
+            else:
+                await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
+                return None
         else:
             await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
             return None
@@ -149,7 +168,9 @@ async def validate_intake_node(node_input: Any, ctx: Context) -> Event | Request
     interrupt_id = f"validate_captured_brief_{intake_cycle}"
 
     # Step 1: Interrupt if human input is not yet received
-    if not ctx.resume_inputs or interrupt_id not in ctx.resume_inputs:
+    if (not ctx.resume_inputs or interrupt_id not in ctx.resume_inputs) and not ctx.state.get(
+        "intake_confirmed_by_chat"
+    ):
         company_name = brief_data.get("company_name", "")
         time_span = brief_data.get("time_span", "")
         region = brief_data.get("region", "")
@@ -167,7 +188,8 @@ async def validate_intake_node(node_input: Any, ctx: Context) -> Event | Request
         )
 
     # Step 2: Resume with human validation input
-    resume_data = ctx.resume_inputs[interrupt_id]
+    ctx.state["intake_confirmed_by_chat"] = False
+    resume_data = (ctx.resume_inputs or {}).get(interrupt_id)
     if isinstance(resume_data, IntakeValidationResponse):
         validated = resume_data
     elif isinstance(resume_data, dict):

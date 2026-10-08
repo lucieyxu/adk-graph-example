@@ -41,5 +41,5 @@ jobs:
         env:
           GOOGLE_GENAI_USE_VERTEXAI: "1"
           GOOGLE_CLOUD_PROJECT: "test-project"
-          GOOGLE_CLOUD_LOCATION: "us-central1"
+          GOOGLE_CLOUD_LOCATION: "global"
         run: uv run pytest tests/unit tests/integration/test_workflow_replay.py -v

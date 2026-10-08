@@ -624,3 +624,180 @@ async def test_workflow_hitl_validation_with_blank_form_submission():
             s_final.state.get("report_markdown")
             == "# Comprehensive Company Health Report for Alphabet"
         )
+
+
+@pytest.mark.asyncio
+async def test_workflow_hitl_question_routes_to_explanation_and_resumes_on_submit():
+    """Verifies asking questions at HITL routes to explanation_agent without advancing."""
+    session_service = InMemorySessionService()
+    session = await session_service.create_session(user_id="test_user", app_name="test_app")
+    runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
+
+    async def fake_run_async_impl(
+        self: LlmAgent, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        if self.name == "intake_agent":
+            fc = types.FunctionCall(
+                name="finish_task",
+                args={"company_name": "XYZ", "time_span": "FY2025", "region": "Global"},
+                id="call_finish_task_1",
+            )
+            yield Event(
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_text(text="Captured XYZ in Global for FY2025..."),
+                        types.Part(function_call=fc),
+                    ],
+                )
+            )
+            fr = types.FunctionResponse(
+                name="finish_task",
+                response={"result": FINISH_TASK_SUCCESS_RESULT},
+                id="call_finish_task_1",
+            )
+            yield Event(
+                content=types.Content(
+                    role="user",
+                    parts=[types.Part(function_response=fr)],
+                )
+            )
+        elif self.name == "explanation_agent":
+            yield Event(
+                output="XYZ was founded in 2010 by Jane Doe and John Smith.",
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_text(
+                            text="XYZ was founded in 2010 by Jane Doe and John Smith."
+                        )
+                    ],
+                ),
+            )
+        elif self.name == "report_synthesizer_agent":
+            yield Event(
+                output="# Comprehensive Company Health Report for XYZ",
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part.from_text(text="# Comprehensive Company Health Report for XYZ")
+                    ],
+                ),
+            )
+        else:
+            raise ValueError(f"Unexpected LlmAgent call: {self.name}")
+
+    async def fake_classify_intent(query: str) -> IntentCategory:
+        if "founded" in query.lower() or "who" in query.lower():
+            return IntentCategory.ASK_EXPLANATION
+        return IntentCategory.MODIFY
+
+    with (
+        patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl),
+        patch(
+            "company_health_analyst.nodes.classify_intent_async",
+            side_effect=fake_classify_intent,
+        ),
+    ):
+        # Turn 1: User provides request with brief -> intake captures and interrupts at HITL
+        msg1 = types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text="Do the analysis on this brief for XYZ in FY2025 Global")
+            ],
+        )
+        events1 = [
+            event
+            async for event in runner.run_async(
+                new_message=msg1,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events1) > 0
+        has_hitl_request = any(
+            event.content
+            and event.content.parts
+            and any(
+                getattr(p, "function_call", None) is not None
+                and p.function_call.id == "validate_captured_brief_1"
+                for p in event.content.parts
+            )
+            for event in events1
+        )
+        assert has_hitl_request, "Expected HITL validation interrupt request on Turn 1."
+
+        s1 = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        assert s1.state.get("is_report_created") is not True
+        assert s1.state.get("company_brief") == {
+            "company_name": "XYZ",
+            "time_span": "FY2025",
+            "region": "Global",
+        }
+
+        # Turn 2: User asks question instead of submitting form -> routes to explanation_agent
+        msg2 = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text="When was the company founded and by who?")],
+        )
+        events2 = [
+            event
+            async for event in runner.run_async(
+                new_message=msg2,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events2) > 0
+        has_answer = any(
+            event.content
+            and event.content.parts
+            and any("founded in 2010" in (p.text or "") for p in event.content.parts)
+            for event in events2
+        )
+        assert has_answer, "Expected explanation_agent answer on Turn 2."
+
+        s2 = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        # Report should still NOT be created
+        assert s2.state.get("is_report_created") is not True
+        # Brief parameters should remain intact
+        assert s2.state.get("company_brief") == {
+            "company_name": "XYZ",
+            "time_span": "FY2025",
+            "region": "Global",
+        }
+
+        # Turn 3: User submits the HITL form -> resumes and creates report
+        hitl_fr = types.FunctionResponse(
+            name="adk_request_input",
+            response={
+                "approved": True,
+                "company_name": "XYZ",
+                "time_span": "FY2025",
+                "region": "Global",
+            },
+            id="validate_captured_brief_1",
+        )
+        msg3 = types.Content(role="user", parts=[types.Part(function_response=hitl_fr)])
+        events3 = [
+            event
+            async for event in runner.run_async(
+                new_message=msg3,
+                user_id="test_user",
+                session_id=session.id,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            )
+        ]
+        assert len(events3) > 0
+
+        s3 = await session_service.get_session(
+            app_name="test_app", user_id="test_user", session_id=session.id
+        )
+        assert s3.state.get("is_report_created") is True
+        assert s3.state.get("report_markdown") == "# Comprehensive Company Health Report for XYZ"

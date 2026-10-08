@@ -54,7 +54,7 @@ company-health-analyst/
 │   ├── fast_api_app.py        # Production server entrypoint with streaming SSE endpoints
 │   └── app_utils/             # Configuration & logging helpers
 ├── tests/                     # Test suite
-│   ├── unit/                  # Fast offline unit tests (test_agent.py)
+│   ├── unit/                  # Fast offline unit tests (test_agent.py, test_self_healing_plugin.py)
 │   ├── integration/           # Live Vertex AI & deterministic workflow replay tests
 │   └── eval/                  # Evaluation methodology & datasets
 ├── app.py                     # Local ASGI application entrypoint
@@ -176,6 +176,30 @@ When invoking subagents from custom Python workflow nodes, ADK 2.0 provides two 
 - **Use `agent.run_async(inv_ctx)`** when:
   - **Programmatic Event Interception & Output Silencing**: You want to manually iterate through the raw event stream (`async for event in agent.run_async(inv_ctx):`) to capture specific metadata, inspect intermediate tool calls, or parse structured payloads without streaming them to the user.
   - **Manual Invocation Control**: You need fine-grained control over execution with a custom `InvocationContext` outside the standard engine-delegated streaming lifecycle.
+
+### 9. Self-Healing Error Recovery with `ReflectAndRetryToolPlugin`
+
+To make the autonomous intake agent resilient against tool hallucinations during conversational elicitation, the application configures ADK's built-in [`ReflectAndRetryToolPlugin`](company_health_analyst/agent.py):
+
+- **Why We Are Using It (Preventing Fatal Tool Hallucination Crashes)**:
+  - When [`intake_agent`](company_health_analyst/subagents.py) operates under ADK Task Mode (`mode="task"`), system instructions heavily condition the model to complete its delegated task using tools and only call `finish_task` once complete.
+  - When required parameters are missing or ambiguous during multi-turn intake, the model under execution pressure can mistake its environment for a programmatic terminal runtime and hallucinate standard I/O functions like `readLine` (or `readline`, `input`) to fetch user input.
+  - Without an error recovery interceptor, ADK's tool caller fails to find `readLine` in the agent's tool registry and raises an unhandled `ValueError: Tool 'readLine' not found`, immediately crashing the turn and aborting the session.
+
+- **How It Works**:
+  - **Application-Level Plugin Mount (`App.plugins`)**: In [`company_health_analyst/agent.py`](company_health_analyst/agent.py), `ReflectAndRetryToolPlugin` is attached to `App(plugins=[...])`. The ADK `PluginManager` automatically propagates this error interceptor to all dynamically dispatched agents and child nodes (including `intake_agent`).
+  - **Intercepting Tool Exceptions**: When Gemini emits an unresolvable function call such as `FunctionCall(name='readLine', ...)`, ADK's dispatcher catches the `ValueError` and delegates it to the plugin's `on_tool_error_callback`.
+  - **Injecting Dynamic Reflection Guidance**: Instead of terminating execution, the plugin increments a retry counter and converts the exception into a structured `FunctionResponse` event within the same invocation:
+    ```text
+    The call to tool `readLine` failed.
+    Error Details: Tool 'readLine' not found. Available tools: fetch_report_context, search_previous_reports, finish_task
+    Reflection Guidance:
+    This is retry attempt 1 of 2. Analyze the error and the arguments you provided.
+    ...
+    5. Wrong Function Name: Does the error indicate the tool is not found? Please check again and only use available tools.
+    ```
+  - **In-Turn Conversational Recovery**: Gemini receives this reflection feedback in the same turn, recognizes that `readLine` does not exist and that only registered tools are valid, and self-corrects by outputting natural conversational text to ask the user for the missing parameters.
+  - **Safe Resilience Configuration**: Setting `max_retries=2` and `throw_exception_if_retry_exceeded=False` bounds reflection attempts while ensuring that unexpected tool failures degrade gracefully into conversational fallback rather than unhandled server errors.
 
 ## Requirements
 

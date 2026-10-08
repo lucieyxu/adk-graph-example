@@ -1,7 +1,7 @@
 name: company-health-analyst
 acli_version: 1.8.0
 agent_directory: company_health_analyst
-region: us-central1
+region: global
 base_template: adk
 generated_at: '2026-06-09T18:33:14+00:00'
 language: python

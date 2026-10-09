@@ -1,9 +1,13 @@
-from enum import Enum
-
 from pydantic import BaseModel, Field
 
 
-class CompanyBrief(BaseModel):
+class PipelineInput(BaseModel):
+    """Arguments the coordinator passes when invoking the analysis pipeline tool.
+
+    These field descriptions become the tool's function declaration, so they are
+    read by the root agent's model when it decides how to call the pipeline.
+    """
+
     company_name: str = Field(description="Name of the company to analyze.")
     time_span: str = Field(
         description="Target analysis timeframe (e.g., 'last year', 'Q2 2026', 'FY2025')."
@@ -11,13 +15,17 @@ class CompanyBrief(BaseModel):
     region: str = Field(
         description="Target geographical focus/region (e.g., 'US', 'Europe', 'Global')."
     )
-    summary: str | None = Field(
-        default=None, description="Natural language summary of the analysis request."
-    )
 
 
 class IntakeValidationResponse(BaseModel):
-    """User response when validating captured intake parameters."""
+    """User response when validating captured intake parameters.
+
+    Booleans here are rendered as checkboxes that the ADK Web UI starts unticked and
+    submits on every Submit, whatever default is declared on the field. The only safe
+    meaning for a boolean is therefore one where ``False`` is what pressing Submit
+    untouched should mean -- hence ``cancel`` rather than an ``approved`` flag, which
+    would arrive as ``False`` on every submission and decline every run.
+    """
 
     company_name: str | None = Field(
         default=None,
@@ -34,30 +42,13 @@ class IntakeValidationResponse(BaseModel):
     summary: str | None = Field(
         default=None, description="Natural language summary of the analysis request."
     )
-    approved: bool = Field(
-        default=True,
-        description="Whether the captured parameters are confirmed by the human.",
+    cancel: bool = Field(
+        default=False,
+        description=(
+            "Tick to cancel this analysis without running it. "
+            "Leave unticked and press Submit to proceed."
+        ),
     )
-
-
-class ExtractorOutput(BaseModel):
-    company_brief: CompanyBrief
-    conflicts: list[str] = Field(
-        default_factory=list, description="Contradictions detected between inputs."
-    )
-
-
-class IntentCategory(str, Enum):
-    GENERATE_REPORT = "generate_report"
-    MODIFY = "modify"
-    CONFIRM_REPORT = "confirm_report"
-    ASK_EXPLANATION = "ask_explanation"
-    FALLBACK = "fallback"
-
-
-class IntentClassification(BaseModel):
-    intent: IntentCategory
-    explanation: str
 
 
 class SearchResultItem(BaseModel):

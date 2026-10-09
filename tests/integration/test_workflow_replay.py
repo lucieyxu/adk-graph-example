@@ -1,803 +1,370 @@
-"""Tests for workflow execution with task-mode intake agent."""
+"""Replay tests for the coordinator agent driving the pipeline workflow as a tool.
+
+The coordinator's model is replaced with a scripted fake so the real ADK flow runs:
+the function call it emits is genuinely dispatched to the pipeline ``NodeTool``, the
+graph executes, and its human-in-the-loop interrupt propagates back out through the
+tool boundary. Only the two model calls are faked, never the orchestration.
+"""
 
 from collections.abc import AsyncGenerator
+from typing import Any
 from unittest.mock import patch
-import pytest
 
-from google.adk import Event
+import pytest
 from google.adk.agents import LlmAgent
-from google.adk.agents.invocation_context import InvocationContext
-from google.adk.agents.llm.task._finish_task_tool import FINISH_TASK_SUCCESS_RESULT
 from google.adk.agents.run_config import RunConfig, StreamingMode
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_request import LlmRequest
+from google.adk.models.llm_response import LlmResponse
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from company_health_analyst.graph import root_agent
-from company_health_analyst.schemas import IntentCategory
+from company_health_analyst.agent import app
+from company_health_analyst.graph import PIPELINE_TOOL_NAME
+
+REPORT_TEXT = "# Comprehensive Company Health Report for Alphabet"
+
+
+class ScriptedLlm(BaseLlm):
+    """A fake model that replays a per-agent script of responses.
+
+    Attributes:
+        coordinator_script: Responses for the coordinator, consumed one per model call.
+        synthesizer_text: The report text the synthesizer node "writes".
+        calls: Names of the agents whose model was invoked, in order.
+    """
+
+    coordinator_script: list[types.Content] = []
+    synthesizer_text: str = REPORT_TEXT
+    calls: list[str] = []
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[LlmResponse, None]:
+        """Yields the next scripted response for the requesting agent."""
+        agent_name = ""
+        if llm_request.config and llm_request.config.system_instruction:
+            instruction = str(llm_request.config.system_instruction)
+            if "Senior Corporate Health Analyst" in instruction:
+                agent_name = "report_synthesizer_agent"
+            else:
+                agent_name = "company_health_coordinator"
+        self.calls.append(agent_name)
+
+        if agent_name == "report_synthesizer_agent":
+            yield LlmResponse(
+                content=types.Content(
+                    role="model", parts=[types.Part.from_text(text=self.synthesizer_text)]
+                )
+            )
+            return
+
+        if not self.coordinator_script:
+            raise AssertionError("Coordinator model called more times than the script allows.")
+        yield LlmResponse(content=self.coordinator_script.pop(0))
+
+
+def _text(text: str) -> types.Content:
+    """Builds a model turn that only replies conversationally."""
+    return types.Content(role="model", parts=[types.Part.from_text(text=text)])
+
+
+def _pipeline_call(call_id: str, company_name: str, time_span: str, region: str) -> types.Content:
+    """Builds a model turn that invokes the pipeline tool."""
+    return types.Content(
+        role="model",
+        parts=[
+            types.Part(
+                function_call=types.FunctionCall(
+                    name=PIPELINE_TOOL_NAME,
+                    args={
+                        "company_name": company_name,
+                        "time_span": time_span,
+                        "region": region,
+                    },
+                    id=call_id,
+                )
+            )
+        ],
+    )
+
+
+def _hitl_response(interrupt_id: str, **fields: Any) -> types.Content:
+    """Builds the user turn that answers a pending HITL interrupt."""
+    return types.Content(
+        role="user",
+        parts=[
+            types.Part(
+                function_response=types.FunctionResponse(
+                    name="adk_request_input",
+                    response=fields,
+                    id=interrupt_id,
+                )
+            )
+        ],
+    )
+
+
+async def _run(runner: Runner, session_id: str, message: types.Content) -> list:
+    """Drives one turn and returns its events."""
+    return [
+        event
+        async for event in runner.run_async(
+            new_message=message,
+            user_id="test_user",
+            session_id=session_id,
+            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+        )
+    ]
+
+
+def _interrupt_ids(events: list) -> list[str]:
+    """Extracts the interrupt IDs of any HITL requests emitted in these events."""
+    ids = []
+    for event in events:
+        for part in event.content.parts if event.content and event.content.parts else []:
+            if part.function_call and part.function_call.name == "adk_request_input":
+                ids.append(part.function_call.args.get("interruptId"))
+    return ids
+
+
+def _texts(events: list) -> str:
+    """Concatenates all model text emitted in these events."""
+    return " ".join(
+        part.text
+        for event in events
+        for part in (event.content.parts if event.content and event.content.parts else [])
+        if part.text
+    )
+
+
+@pytest.fixture(name="harness")
+def _harness():
+    """Provides a runner, session service and the scripted model, with the model patched in."""
+    session_service = InMemorySessionService()
+    session = session_service.create_session_sync(user_id="test_user", app_name="test_app")
+    runner = Runner(app=app, session_service=session_service, app_name="test_app")
+    fake = ScriptedLlm(model="fake-model", coordinator_script=[], calls=[])
+
+    with patch.object(LlmAgent, "canonical_model", property(lambda self: fake)):
+        yield runner, session_service, session, fake
 
 
 @pytest.mark.asyncio
-async def test_workflow_task_mode_conversation_and_report_generation():
-    """Verifies that intake_agent has multi-turn dialog and advances only on finish_task."""
-    session_service = InMemorySessionService()
-    session = await session_service.create_session(user_id="test_user", app_name="test_app")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
+async def test_coordinator_converses_then_invokes_pipeline(harness):
+    """Verifies conversational intake, tool invocation, HITL gating, and report creation."""
+    runner, session_service, session, fake = harness
+    fake.coordinator_script = [
+        _text("Hello! I can analyze company financial health. Which company?"),
+        _text("Captured Alphabet. What timeframe and region should I focus on?"),
+        _pipeline_call("call_1", "Alphabet", "Q1 2026", "US"),
+    ]
 
-    turn = 0
-    modify_called = False
+    events1 = await _run(runner, session.id, _text("Hi! What can you do?"))
+    assert "analyze company financial health" in _texts(events1)
 
-    async def fake_run_async_impl(
-        self: LlmAgent, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        nonlocal turn, modify_called
-        if self.name == "intake_agent":
-            if turn == 0:
-                turn += 1
-                yield Event(
-                    content=types.Content(
-                        role="model",
-                        parts=[
-                            types.Part.from_text(
-                                text=(
-                                    "Hello! I can help you analyze company financial health. "
-                                    "What company would you like to analyze?"
-                                )
-                            )
-                        ],
-                    )
-                )
-            elif turn == 1:
-                turn += 1
-                yield Event(
-                    content=types.Content(
-                        role="model",
-                        parts=[
-                            types.Part.from_text(
-                                text=(
-                                    "I have captured Alphabet. "
-                                    "What timeframe and region should I focus on?"
-                                )
-                            )
-                        ],
-                    )
-                )
-            elif not modify_called:
-                # Initial brief completion
-                fc = types.FunctionCall(
-                    name="finish_task",
-                    args={"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"},
-                    id="call_finish_task_1",
-                )
-                yield Event(
-                    content=types.Content(
-                        role="model",
-                        parts=[
-                            types.Part.from_text(text="Analyzing Alphabet in US for Q1 2026..."),
-                            types.Part(function_call=fc),
-                        ],
-                    )
-                )
-                fr = types.FunctionResponse(
-                    name="finish_task",
-                    response={"result": FINISH_TASK_SUCCESS_RESULT},
-                    id="call_finish_task_1",
-                )
-                yield Event(
-                    content=types.Content(
-                        role="user",
-                        parts=[types.Part(function_response=fr)],
-                    )
-                )
-            else:
-                # Modified brief completion
-                fc = types.FunctionCall(
-                    name="finish_task",
-                    args={"company_name": "Alphabet", "time_span": "Q1 2026", "region": "Europe"},
-                    id="call_finish_task_2",
-                )
-                yield Event(
-                    content=types.Content(
-                        role="model",
-                        parts=[
-                            types.Part.from_text(
-                                text="Updating region to Europe and regenerating report..."
-                            ),
-                            types.Part(function_call=fc),
-                        ],
-                    )
-                )
-                fr = types.FunctionResponse(
-                    name="finish_task",
-                    response={"result": FINISH_TASK_SUCCESS_RESULT},
-                    id="call_finish_task_2",
-                )
-                yield Event(
-                    content=types.Content(
-                        role="user",
-                        parts=[types.Part(function_response=fr)],
-                    )
-                )
-        elif self.name == "intent_classifier_agent":
-            # Check user query in session events
-            last_user_text = ""
-            if ctx.session and ctx.session.events:
-                for ev in reversed(ctx.session.events):
-                    if ev.author == "user" and ev.content and ev.content.parts:
-                        last_user_text = "".join(p.text or "" for p in ev.content.parts)
-                        if last_user_text:
-                            break
-            if "explain" in last_user_text.lower():
-                yield Event(
-                    output={"intent": "ask_explanation", "explanation": "Explaining report"}
-                )
-            else:
-                modify_called = True
-                yield Event(
-                    output={"intent": "modify", "explanation": "Modifying report parameter"}
-                )
-        elif self.name == "explanation_agent":
-            yield Event(
-                output=(
-                    "Detailed Risk Factors Analysis: The primary risk factors are "
-                    "regulatory antitrust compliance in the EU and data center capex."
-                ),
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part.from_text(
-                            text=(
-                                "Detailed Risk Factors Analysis: The primary risk factors are "
-                                "regulatory antitrust compliance in the EU and data center capex."
-                            )
-                        )
-                    ],
-                ),
-            )
-        elif self.name == "report_synthesizer_agent":
-            if not modify_called:
-                yield Event(
-                    output="# Comprehensive Company Health Report for Alphabet",
-                    content=types.Content(
-                        role="model",
-                        parts=[
-                            types.Part.from_text(
-                                text="# Comprehensive Company Health Report for Alphabet"
-                            )
-                        ],
-                    ),
-                )
-            else:
-                yield Event(
-                    output="# Comprehensive Company Health Report for Alphabet in Europe",
-                    content=types.Content(
-                        role="model",
-                        parts=[
-                            types.Part.from_text(
-                                text="# Comprehensive Company Health Report for Alphabet in Europe"
-                            )
-                        ],
-                    ),
-                )
-        else:
-            raise ValueError(f"Unexpected LlmAgent call: {self.name}")
+    events2 = await _run(runner, session.id, _text("Analyze Alphabet"))
+    assert "Captured Alphabet" in _texts(events2)
 
-    async def fake_classify_intent(query: str) -> IntentCategory:
-        nonlocal modify_called
-        if "explain" in query.lower():
-            return IntentCategory.ASK_EXPLANATION
-        modify_called = True
-        return IntentCategory.MODIFY
+    # Nothing has run yet: no searches, no report.
+    mid = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert mid.state.get("is_report_created") is not True
 
-    with (
-        patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl),
-        patch(
-            "company_health_analyst.nodes.classify_intent_async",
-            side_effect=fake_classify_intent,
+    # Third turn supplies the rest, so the coordinator calls the pipeline, which halts
+    # at the human validation gate before doing any work.
+    events3 = await _run(runner, session.id, _text("US, for Q1 2026"))
+    assert _interrupt_ids(events3) == ["validate_captured_brief_1"]
+
+    pre = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert pre.state.get("is_report_created") is not True
+    assert pre.state.get("search_results") is None
+
+    # Human confirms: the graph resumes inside the same tool call and runs to completion.
+    events4 = await _run(
+        runner, session.id, _hitl_response("validate_captured_brief_1", cancel=False)
+    )
+    assert REPORT_TEXT in _texts(events4)
+
+    final = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert final.state["is_report_created"] is True
+    assert final.state["company_brief"]["company_name"] == "Alphabet"
+    assert final.state["company_brief"]["region"] == "US"
+    assert final.state["validation_cycles"] == 1
+    assert final.state["report_markdown"] == REPORT_TEXT
+    assert final.state["search_results"]["web"]
+    assert final.state["search_results"]["internal"]
+
+
+@pytest.mark.asyncio
+async def test_hitl_field_edits_override_captured_parameters(harness):
+    """Verifies edits typed into the validation form win over the coordinator's arguments."""
+    runner, session_service, session, fake = harness
+    fake.coordinator_script = [_pipeline_call("call_1", "Alphabet", "Q1 2026", "US")]
+
+    events = await _run(runner, session.id, _text("Analyze Alphabet in US for Q1 2026"))
+    assert _interrupt_ids(events) == ["validate_captured_brief_1"]
+
+    await _run(
+        runner,
+        session.id,
+        _hitl_response(
+            "validate_captured_brief_1", cancel=False, region="Europe", time_span="FY2025"
         ),
-    ):
-        # Turn 1: User greets and asks what tool is for
+    )
 
-        msg1 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="Hi! What can you do?")],
-        )
-        events1 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg1,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events1) > 0
-        has_intro = any(
-            event.content
-            and event.content.parts
-            and any("analyze company" in (p.text or "") for p in event.content.parts)
-            for event in events1
-        )
-        assert has_intro
-
-        # Check that the workflow has NOT run searches or created report yet
-        s1 = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s1.state.get("is_report_created") is not True
-
-        # Turn 2: User provides partial information
-        msg2 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="I want to analyze Alphabet")],
-        )
-        events2 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg2,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events2) > 0
-        has_followup = any(
-            event.content
-            and event.content.parts
-            and any("Alphabet" in (p.text or "") for p in event.content.parts)
-            for event in events2
-        )
-        assert has_followup
-
-        s2 = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s2.state.get("is_report_created") is not True
-
-        # Turn 3: User provides missing timeframe and region
-        # Intake agent calls finish_task -> workflow halts at validate_intake_node
-        msg3 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="For Q1 2026 in US")],
-        )
-        events3 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg3,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events3) > 0
-
-        # Verify HITL validation request is emitted and report is NOT created yet
-        has_hitl_request = any(
-            event.content
-            and event.content.parts
-            and any(
-                getattr(p, "function_call", None) is not None
-                and p.function_call.id == "validate_captured_brief_1"
-                for p in event.content.parts
-            )
-            for event in events3
-        )
-        assert has_hitl_request, "Expected HITL validation interrupt request on Turn 3."
-
-        s3_pre = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s3_pre.state.get("is_report_created") is not True
-
-        # Turn 3b: Human confirms captured brief -> workflow resumes and generates report
-        hitl_fr = types.FunctionResponse(
-            name="adk_request_input",
-            response={
-                "approved": True,
-                "company_name": "Alphabet",
-                "time_span": "Q1 2026",
-                "region": "US",
-            },
-            id="validate_captured_brief_1",
-        )
-        msg3b = types.Content(role="user", parts=[types.Part(function_response=hitl_fr)])
-        events3b = [
-            event
-            async for event in runner.run_async(
-                new_message=msg3b,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events3b) > 0
-
-        s3_post = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s3_post.state.get("is_report_created") is True
-        assert (
-            s3_post.state.get("report_markdown")
-            == "# Comprehensive Company Health Report for Alphabet"
-        )
-
-        # Turn 4: Follow-up explanation question on existing report -> routes to explanation_agent
-        msg4 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="explain in more details the risk factors")],
-        )
-        events4 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg4,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events4) > 0
-        has_risk_explanation = any(
-            event.content
-            and event.content.parts
-            and any("risk factors" in (p.text or "").lower() for p in event.content.parts)
-            for event in events4
-        )
-        assert has_risk_explanation
-
-        # Turn 5: Modification -> routes to intake_agent then halts at validate_intake_node
-        msg5 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="change the analysis to Europe now")],
-        )
-        events5 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg5,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events5) > 0
-        has_modify_hitl = any(
-            event.content
-            and event.content.parts
-            and any(
-                getattr(p, "function_call", None) is not None
-                and p.function_call.id == "validate_captured_brief_2"
-                for p in event.content.parts
-            )
-            for event in events5
-        )
-        assert has_modify_hitl, "Expected HITL validation interrupt on Turn 5 modification."
-
-        # Turn 5b: Human confirms modified brief -> workflow resumes and regenerates report
-        hitl_fr5 = types.FunctionResponse(
-            name="adk_request_input",
-            response={
-                "approved": True,
-                "company_name": "Alphabet",
-                "time_span": "Q1 2026",
-                "region": "Europe",
-            },
-            id="validate_captured_brief_2",
-        )
-        msg5b = types.Content(role="user", parts=[types.Part(function_response=hitl_fr5)])
-        events5b = [
-            event
-            async for event in runner.run_async(
-                new_message=msg5b,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events5b) > 0
-
-        s5 = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s5.state.get("company_brief") == {
-            "company_name": "Alphabet",
-            "time_span": "Q1 2026",
-            "region": "Europe",
-            "summary": None,
-        }
-        assert s5.state.get("is_report_created") is True
-        assert (
-            s5.state.get("report_markdown")
-            == "# Comprehensive Company Health Report for Alphabet in Europe"
-        )
+    final = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert final.state["company_brief"]["region"] == "Europe"
+    assert final.state["company_brief"]["time_span"] == "FY2025"
+    assert final.state["company_brief"]["company_name"] == "Alphabet"
+    assert final.state["is_report_created"] is True
 
 
 @pytest.mark.asyncio
-async def test_workflow_hitl_validation_with_field_edits():
-    """Verifies that human can correct/override parameters during the HITL validation step."""
-    session_service = InMemorySessionService()
-    session = await session_service.create_session(user_id="test_user", app_name="test_app")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
+async def test_hitl_blank_form_submission_preserves_captured_parameters(harness):
+    """Verifies submitting the validation form untouched keeps the captured parameters."""
+    runner, session_service, session, fake = harness
+    fake.coordinator_script = [_pipeline_call("call_1", "Alphabet", "Q1 2026", "US")]
 
-    async def fake_run_async_impl(
-        self: LlmAgent, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        if self.name == "intake_agent":
-            # Initial brief completion with US
-            fc = types.FunctionCall(
-                name="finish_task",
-                args={"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"},
-                id="call_finish_task_1",
-            )
-            yield Event(
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part.from_text(text="Captured Alphabet in US..."),
-                        types.Part(function_call=fc),
-                    ],
-                )
-            )
-            fr = types.FunctionResponse(
-                name="finish_task",
-                response={"result": FINISH_TASK_SUCCESS_RESULT},
-                id="call_finish_task_1",
-            )
-            yield Event(
-                content=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=fr)],
-                )
-            )
-        elif self.name == "report_synthesizer_agent":
-            yield Event(
-                output="# Comprehensive Company Health Report for Alphabet in Asia",
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part.from_text(
-                            text="# Comprehensive Company Health Report for Alphabet in Asia"
-                        )
-                    ],
-                ),
-            )
-        else:
-            raise ValueError(f"Unexpected LlmAgent call: {self.name}")
-
-    with patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl):
-        # Step 1: Intake captures parameters
-        msg1 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="Analyze Alphabet for Q1 2026 in US")],
-        )
-        events1 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg1,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events1) > 0
-
-        # Step 2: Human overrides region from US to Asia during HITL validation
-        hitl_edit_fr = types.FunctionResponse(
-            name="adk_request_input",
-            response={
-                "approved": True,
-                "company_name": "Alphabet",
-                "time_span": "Q1 2026",
-                "region": "Asia",
-            },
-            id="validate_captured_brief_1",
-        )
-        msg2 = types.Content(role="user", parts=[types.Part(function_response=hitl_edit_fr)])
-        events2 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg2,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events2) > 0
-
-        s_final = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s_final.state.get("company_brief") == {
-            "company_name": "Alphabet",
-            "time_span": "Q1 2026",
-            "region": "Asia",
-            "summary": None,
-        }
-        assert s_final.state.get("is_report_created") is True
-        assert (
-            s_final.state.get("report_markdown")
-            == "# Comprehensive Company Health Report for Alphabet in Asia"
-        )
-
-
-@pytest.mark.asyncio
-async def test_workflow_hitl_validation_with_blank_form_submission():
-    """Verifies that submitting blank form (nulls) retains the captured parameters."""
-    session_service = InMemorySessionService()
-    session = await session_service.create_session(user_id="test_user", app_name="test_app")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
-
-    async def fake_run_async_impl(
-        self: LlmAgent, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        if self.name == "intake_agent":
-            fc = types.FunctionCall(
-                name="finish_task",
-                args={"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"},
-                id="call_finish_task_1",
-            )
-            yield Event(
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part.from_text(text="Captured Alphabet in US..."),
-                        types.Part(function_call=fc),
-                    ],
-                )
-            )
-            fr = types.FunctionResponse(
-                name="finish_task",
-                response={"result": FINISH_TASK_SUCCESS_RESULT},
-                id="call_finish_task_1",
-            )
-            yield Event(
-                content=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=fr)],
-                )
-            )
-        elif self.name == "report_synthesizer_agent":
-            yield Event(
-                output="# Comprehensive Company Health Report for Alphabet",
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part.from_text(
-                            text="# Comprehensive Company Health Report for Alphabet"
-                        )
-                    ],
-                ),
-            )
-        else:
-            raise ValueError(f"Unexpected LlmAgent call: {self.name}")
-
-    with patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl):
-        # Step 1: Intake captures parameters
-        msg1 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="Analyze Alphabet for Q1 2026 in US")],
-        )
-        events1 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg1,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events1) > 0
-
-        # Step 2: Human submits form blank (UI sends nulls for empty text fields)
-        hitl_blank_fr = types.FunctionResponse(
-            name="adk_request_input",
-            response={
-                "approved": True,
-                "company_name": None,
-                "time_span": None,
-                "region": None,
-                "summary": None,
-            },
-            id="validate_captured_brief_1",
-        )
-        msg2 = types.Content(role="user", parts=[types.Part(function_response=hitl_blank_fr)])
-        events2 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg2,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events2) > 0
-
-        s_final = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s_final.state.get("company_brief") == {
-            "company_name": "Alphabet",
-            "time_span": "Q1 2026",
-            "region": "US",
-            "summary": None,
-        }
-        assert s_final.state.get("is_report_created") is True
-        assert (
-            s_final.state.get("report_markdown")
-            == "# Comprehensive Company Health Report for Alphabet"
-        )
-
-
-@pytest.mark.asyncio
-async def test_workflow_hitl_question_routes_to_explanation_and_resumes_on_submit():
-    """Verifies asking questions at HITL routes to explanation_agent without advancing."""
-    session_service = InMemorySessionService()
-    session = await session_service.create_session(user_id="test_user", app_name="test_app")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test_app")
-
-    async def fake_run_async_impl(
-        self: LlmAgent, ctx: InvocationContext
-    ) -> AsyncGenerator[Event, None]:
-        if self.name == "intake_agent":
-            fc = types.FunctionCall(
-                name="finish_task",
-                args={"company_name": "XYZ", "time_span": "FY2025", "region": "Global"},
-                id="call_finish_task_1",
-            )
-            yield Event(
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part.from_text(text="Captured XYZ in Global for FY2025..."),
-                        types.Part(function_call=fc),
-                    ],
-                )
-            )
-            fr = types.FunctionResponse(
-                name="finish_task",
-                response={"result": FINISH_TASK_SUCCESS_RESULT},
-                id="call_finish_task_1",
-            )
-            yield Event(
-                content=types.Content(
-                    role="user",
-                    parts=[types.Part(function_response=fr)],
-                )
-            )
-        elif self.name == "explanation_agent":
-            yield Event(
-                output="XYZ was founded in 2010 by Jane Doe and John Smith.",
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part.from_text(
-                            text="XYZ was founded in 2010 by Jane Doe and John Smith."
-                        )
-                    ],
-                ),
-            )
-        elif self.name == "report_synthesizer_agent":
-            yield Event(
-                output="# Comprehensive Company Health Report for XYZ",
-                content=types.Content(
-                    role="model",
-                    parts=[
-                        types.Part.from_text(text="# Comprehensive Company Health Report for XYZ")
-                    ],
-                ),
-            )
-        else:
-            raise ValueError(f"Unexpected LlmAgent call: {self.name}")
-
-    async def fake_classify_intent(query: str) -> IntentCategory:
-        if "founded" in query.lower() or "who" in query.lower():
-            return IntentCategory.ASK_EXPLANATION
-        return IntentCategory.MODIFY
-
-    with (
-        patch.object(LlmAgent, "_run_async_impl", fake_run_async_impl),
-        patch(
-            "company_health_analyst.nodes.classify_intent_async",
-            side_effect=fake_classify_intent,
+    await _run(runner, session.id, _text("Analyze Alphabet in US for Q1 2026"))
+    await _run(
+        runner,
+        session.id,
+        _hitl_response(
+            "validate_captured_brief_1",
+            cancel=False,
+            company_name=None,
+            time_span=None,
+            region=None,
+            summary=None,
         ),
-    ):
-        # Turn 1: User provides request with brief -> intake captures and interrupts at HITL
-        msg1 = types.Content(
-            role="user",
-            parts=[
-                types.Part.from_text(text="Do the analysis on this brief for XYZ in FY2025 Global")
-            ],
-        )
-        events1 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg1,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events1) > 0
-        has_hitl_request = any(
-            event.content
-            and event.content.parts
-            and any(
-                getattr(p, "function_call", None) is not None
-                and p.function_call.id == "validate_captured_brief_1"
-                for p in event.content.parts
-            )
-            for event in events1
-        )
-        assert has_hitl_request, "Expected HITL validation interrupt request on Turn 1."
+    )
 
-        s1 = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s1.state.get("is_report_created") is not True
-        assert s1.state.get("company_brief") == {
-            "company_name": "XYZ",
-            "time_span": "FY2025",
-            "region": "Global",
-        }
+    final = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert final.state["company_brief"]["company_name"] == "Alphabet"
+    assert final.state["company_brief"]["time_span"] == "Q1 2026"
+    assert final.state["company_brief"]["region"] == "US"
+    assert final.state["is_report_created"] is True
 
-        # Turn 2: User asks question instead of submitting form -> routes to explanation_agent
-        msg2 = types.Content(
-            role="user",
-            parts=[types.Part.from_text(text="When was the company founded and by who?")],
-        )
-        events2 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg2,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events2) > 0
-        has_answer = any(
-            event.content
-            and event.content.parts
-            and any("founded in 2010" in (p.text or "") for p in event.content.parts)
-            for event in events2
-        )
-        assert has_answer, "Expected explanation_agent answer on Turn 2."
 
-        s2 = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        # Report should still NOT be created
-        assert s2.state.get("is_report_created") is not True
-        # Brief parameters should remain intact
-        assert s2.state.get("company_brief") == {
-            "company_name": "XYZ",
-            "time_span": "FY2025",
-            "region": "Global",
-        }
+@pytest.mark.asyncio
+async def test_rerun_requires_a_fresh_confirmation(harness):
+    """Verifies a second analysis re-asks for confirmation under a new interrupt ID.
 
-        # Turn 3: User submits the HITL form -> resumes and creates report
-        hitl_fr = types.FunctionResponse(
-            name="adk_request_input",
-            response={
-                "approved": True,
-                "company_name": "XYZ",
-                "time_span": "FY2025",
-                "region": "Global",
-            },
-            id="validate_captured_brief_1",
-        )
-        msg3 = types.Content(role="user", parts=[types.Part(function_response=hitl_fr)])
-        events3 = [
-            event
-            async for event in runner.run_async(
-                new_message=msg3,
-                user_id="test_user",
-                session_id=session.id,
-                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
-            )
-        ]
-        assert len(events3) > 0
+    Guards the stale-resume hazard: cycle 1's answer is still in resume_inputs, and
+    must not silently approve cycle 2's parameters.
+    """
+    runner, session_service, session, fake = harness
+    fake.coordinator_script = [
+        _pipeline_call("call_1", "Alphabet", "Q1 2026", "US"),
+        _pipeline_call("call_2", "Alphabet", "Q1 2026", "Asia"),
+    ]
 
-        s3 = await session_service.get_session(
-            app_name="test_app", user_id="test_user", session_id=session.id
-        )
-        assert s3.state.get("is_report_created") is True
-        assert s3.state.get("report_markdown") == "# Comprehensive Company Health Report for XYZ"
+    await _run(runner, session.id, _text("Analyze Alphabet in US for Q1 2026"))
+    await _run(runner, session.id, _hitl_response("validate_captured_brief_1", cancel=False))
+
+    after_first = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert after_first.state["company_brief"]["region"] == "US"
+    assert after_first.state["validation_cycles"] == 1
+
+    # Modification: the pipeline must stop at a *new* gate rather than reuse cycle 1's answer.
+    events = await _run(runner, session.id, _text("Change the region to Asia"))
+    assert _interrupt_ids(events) == ["validate_captured_brief_2"]
+
+    stalled = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert stalled.state["company_brief"]["region"] == "US"
+
+    await _run(runner, session.id, _hitl_response("validate_captured_brief_2", cancel=False))
+
+    final = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert final.state["company_brief"]["region"] == "Asia"
+    assert final.state["validation_cycles"] == 2
+
+
+@pytest.mark.asyncio
+async def test_declining_the_form_aborts_the_run_and_allows_a_retry(harness):
+    """Verifies declining the validation form blocks the analysis, then permits a retry.
+
+    Covers the whole decline path: no searching, nothing written to the brief, the user
+    is actually told, and the retry opens a fresh gate instead of replaying the refusal.
+    """
+    runner, session_service, session, fake = harness
+    fake.coordinator_script = [
+        _pipeline_call("call_1", "Alphabet", "Q1 2026", "US"),
+        _pipeline_call("call_2", "Alphabet", "Q1 2026", "Europe"),
+    ]
+
+    events = await _run(runner, session.id, _text("Analyze Alphabet in US for Q1 2026"))
+    assert _interrupt_ids(events) == ["validate_captured_brief_1"]
+
+    declined = await _run(
+        runner, session.id, _hitl_response("validate_captured_brief_1", cancel=True)
+    )
+
+    # The user must hear about it: the coordinator is not re-invoked on this path, so
+    # the graph node itself has to speak.
+    assert "cancelled" in _texts(declined).lower()
+
+    after_decline = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert after_decline.state.get("is_report_created") is not True
+    assert after_decline.state.get("report_markdown") is None
+    assert after_decline.state.get("search_results") is None
+    # Declined parameters must not be adopted as the active brief.
+    assert after_decline.state.get("company_brief") is None
+    assert after_decline.state["validation_cycles"] == 1
+
+    # Retrying must open a new gate rather than rediscovering the refusal.
+    retry = await _run(runner, session.id, _text("Use Europe instead"))
+    assert _interrupt_ids(retry) == ["validate_captured_brief_2"]
+
+    await _run(runner, session.id, _hitl_response("validate_captured_brief_2", cancel=False))
+
+    final = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    assert final.state["is_report_created"] is True
+    assert final.state["company_brief"]["region"] == "Europe"
+    assert final.state["validation_cycles"] == 2
+
+
+@pytest.mark.asyncio
+async def test_coordinator_answers_questions_without_running_the_pipeline(harness):
+    """Verifies analytical Q&A is handled by the coordinator, leaving the report untouched."""
+    runner, session_service, session, fake = harness
+    fake.coordinator_script = [
+        _pipeline_call("call_1", "Alphabet", "Q1 2026", "US"),
+        _text("The primary risk factors are EU antitrust compliance and data center capex."),
+    ]
+
+    await _run(runner, session.id, _text("Analyze Alphabet in US for Q1 2026"))
+    await _run(runner, session.id, _hitl_response("validate_captured_brief_1", cancel=False))
+
+    events = await _run(runner, session.id, _text("Explain the risk factors in more detail"))
+
+    assert "antitrust" in _texts(events)
+    assert _interrupt_ids(events) == []
+
+    final = await session_service.get_session(
+        app_name="test_app", user_id="test_user", session_id=session.id
+    )
+    # The Q&A turn must not have started another analysis cycle.
+    assert final.state["validation_cycles"] == 1
+    assert final.state["report_markdown"] == REPORT_TEXT

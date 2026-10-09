@@ -1,8 +1,6 @@
-import json
 import logging
 from typing import Any
 
-from google import genai
 from google.adk import Event
 from google.adk.agents.context import Context
 from google.adk.events.event_actions import EventActions
@@ -10,175 +8,75 @@ from google.adk.events.request_input import RequestInput
 from google.adk.workflow import node
 from google.genai import types
 from pydantic import BaseModel
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from company_health_analyst.app_utils.config import AGENT_MODEL, GCP_LOCATION, GCP_PROJECT_ID
-from company_health_analyst.prompts import PromptTemplate
 from company_health_analyst.schemas import (
     IntakeValidationResponse,
-    IntentCategory,
-    IntentClassification,
     SearchResultItem,
 )
 from company_health_analyst.services import (
     MockInternalService,
     MockSearchService,
 )
-from company_health_analyst.subagents import (
-    explanation_agent,
-    intake_agent,
-)
 
 logger = logging.getLogger(__name__)
 
-_genai_client: genai.Client | None = None
+REJECTED_STATUS = "rejected_by_user"
+"""Marks a pipeline run the human declined at the validation gate.
 
+Returned as the tool result so a later coordinator turn can see the analysis did not
+run, rather than answering follow-ups about a report that does not exist.
+"""
 
-def _get_genai_client() -> genai.Client:
-    """Returns a singleton genai.Client initialized from environment ADC."""
-    global _genai_client
-    if _genai_client is None:
-        _genai_client = genai.Client(
-            vertexai=True,
-            project=GCP_PROJECT_ID or None,
-            location=GCP_LOCATION or None,
-        )
-    return _genai_client
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type(Exception),
-    reraise=True,
+REJECTED_MESSAGE = (
+    "You cancelled this analysis at the confirmation step, so nothing was searched and "
+    "no report was produced. Tell me what to change and I will set it up again."
 )
-async def classify_intent_async(query: str) -> IntentCategory:
-    """Classifies user query intent using Vertex AI without mutating session event history.
-
-    Args:
-        query: The raw string query from the user.
-
-    Returns:
-        The classified IntentCategory enum.
-    """
-    client = _get_genai_client()
-    response = await client.aio.models.generate_content(
-        model=AGENT_MODEL,
-        contents=f"Classify user query: {query}",
-        config=types.GenerateContentConfig(
-            system_instruction=PromptTemplate.INTENT_CLASSIFIER,
-            response_mime_type="application/json",
-            response_schema=IntentClassification,
-            temperature=0.0,
-        ),
-    )
-    if response.parsed and isinstance(response.parsed, IntentClassification):
-        return response.parsed.intent
-
-    if response.text:
-        data = json.loads(response.text)
-        return IntentCategory(data.get("intent", IntentCategory.FALLBACK.value))
-
-    return IntentCategory.FALLBACK
-
-
-async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
-    """Routes incoming user requests to subagents and triggers validation on task completion.
-
-    Args:
-        node_input: The incoming user message from START.
-        ctx: The ADK workflow context.
-
-    Returns:
-        Event with route='validate_intake' and output=CompanyBrief when intake completes its task,
-        or None when the turn is conversational and awaiting further user input.
-    """
-    is_report_created = ctx.state.get("is_report_created", False)
-    has_brief = bool(ctx.state.get("company_brief"))
-    query = _extract_text_input(node_input, ctx)
-
-    if is_report_created or has_brief:
-        try:
-            intent = await classify_intent_async(query)
-        except Exception as exc:
-            logger.warning("Intent classification failed: %s. Falling back to explanation.", exc)
-            intent = IntentCategory.FALLBACK
-
-        logger.info(
-            "Classified intent as: %s for query: '%s' (is_report_created=%s, has_brief=%s)",
-            intent,
-            query,
-            is_report_created,
-            has_brief,
-        )
-        if intent in (IntentCategory.GENERATE_REPORT, IntentCategory.MODIFY):
-            ctx.state["is_report_created"] = False
-            # Needed for task mode to treat a fresh cycle when modification happens
-            # after an analysis has already run or after initial parameters were captured
-            intake_cycle = ctx.state.get("intake_cycle", 1) + 1
-            ctx.state["intake_cycle"] = intake_cycle
-            run_id = f"intake_cycle_{intake_cycle}"
-            res = await ctx.run_node(
-                intake_agent, node_input=query, use_as_output=True, run_id=run_id
-            )
-            if res is not None:
-                brief = res.model_dump() if isinstance(res, BaseModel) else res
-                ctx.state["company_brief"] = brief
-                return Event(output=brief, actions=EventActions(route="validate_intake"))
-            return None
-        elif intent == IntentCategory.CONFIRM_REPORT:
-            if not is_report_created:
-                ctx.state["intake_confirmed_by_chat"] = True
-                brief = ctx.state.get("company_brief", {})
-                return Event(output=brief, actions=EventActions(route="validate_intake"))
-            else:
-                await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
-                return None
-        else:
-            await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
-            return None
-    else:
-        intake_cycle = ctx.state.get("intake_cycle", 1)
-        run_id = f"intake_cycle_{intake_cycle}"
-        res = await ctx.run_node(intake_agent, node_input=query, use_as_output=True, run_id=run_id)
-        if res is not None:
-            brief = res.model_dump() if isinstance(res, BaseModel) else res
-            ctx.state["company_brief"] = brief
-            return Event(output=brief, actions=EventActions(route="validate_intake"))
-        return None
+"""Shown to the user when they cancel from the validation form."""
 
 
 @node(name="validate_intake_node", rerun_on_resume=True)
 async def validate_intake_node(node_input: Any, ctx: Context) -> Event | RequestInput | None:
-    """Validates captured company brief with human-in-the-loop before searches begin.
+    """Validates the requested parameters with a human before any searching begins.
+
+    This is the pipeline's entry node: ``node_input`` is the validated
+    :class:`~company_health_analyst.schemas.PipelineInput` the coordinator agent passed
+    when it called the pipeline tool.
 
     Args:
-        node_input: The output from the intake agent (CompanyBrief or dict).
+        node_input: The PipelineInput (or equivalent mapping) for this analysis run.
         ctx: The ADK workflow context.
 
     Returns:
-        RequestInput when awaiting human approval/edits, or Event with route='searches'
-        and validated output upon confirmation.
+        RequestInput when awaiting human approval/edits; an Event routed to 'searches'
+        with the confirmed brief when the human approves; or an unrouted Event carrying
+        REJECTED_STATUS when the human declines, which ends the run without searching.
     """
-    brief_data = ctx.state.get("company_brief") or node_input or {}
+    brief_data = node_input
     if isinstance(brief_data, BaseModel):
         brief_data = brief_data.model_dump()
+    elif not isinstance(brief_data, dict):
+        brief_data = ctx.state.get("company_brief") or {}
 
-    intake_cycle = ctx.state.get("intake_cycle", 1)
-    interrupt_id = f"validate_captured_brief_{intake_cycle}"
+    # Cycle-scoped interrupt IDs keep each pipeline invocation asking for its own
+    # confirmation. A static ID would find the previous cycle's answer already present
+    # in ctx.resume_inputs and silently skip the HITL step with stale parameters.
+    #
+    # `validation_cycles` counts gates the human has ANSWERED, approved or declined,
+    # and is only advanced on the resume pass. That keeps the ID stable across this
+    # node's interrupt/resume pair (it reruns on resume) while still advancing between
+    # runs. Counting approvals only would let a declined run reuse its own ID on the
+    # retry, rediscover its own rejection in resume_inputs, and decline again without
+    # ever asking the human.
+    cycle = ctx.state.get("validation_cycles", 0) + 1
+    interrupt_id = f"validate_captured_brief_{cycle}"
 
     # Step 1: Interrupt if human input is not yet received
-    if (not ctx.resume_inputs or interrupt_id not in ctx.resume_inputs) and not ctx.state.get(
-        "intake_confirmed_by_chat"
-    ):
-        company_name = brief_data.get("company_name", "")
-        time_span = brief_data.get("time_span", "")
-        region = brief_data.get("region", "")
+    if not ctx.resume_inputs or interrupt_id not in ctx.resume_inputs:
         msg = (
             "Please review and confirm the captured company parameters before analysis begins:\n"
-            f"- Company Name: {company_name}\n"
-            f"- Timeframe: {time_span}\n"
-            f"- Region: {region}"
+            f"- Company Name: {brief_data.get('company_name', '')}\n"
+            f"- Timeframe: {brief_data.get('time_span', '')}\n"
+            f"- Region: {brief_data.get('region', '')}"
         )
         return RequestInput(
             interrupt_id=interrupt_id,
@@ -188,49 +86,50 @@ async def validate_intake_node(node_input: Any, ctx: Context) -> Event | Request
         )
 
     # Step 2: Resume with human validation input
-    ctx.state["intake_confirmed_by_chat"] = False
-    resume_data = (ctx.resume_inputs or {}).get(interrupt_id)
+    resume_data = ctx.resume_inputs[interrupt_id]
     if isinstance(resume_data, IntakeValidationResponse):
         validated = resume_data
     elif isinstance(resume_data, dict):
         # Filter out empty or null values so blank form fields in the UI
-        # do not overwrite the captured parameters from intake.
+        # do not overwrite the parameters the coordinator captured.
         overrides = {
             k: v
             for k, v in resume_data.items()
             if v is not None and (not isinstance(v, str) or v.strip() != "")
         }
-        merged = {**brief_data, **overrides}
-        validated = IntakeValidationResponse(**merged)
+        validated = IntakeValidationResponse(**{**brief_data, **overrides})
     else:
         validated = IntakeValidationResponse(**brief_data)
 
-    confirmed_brief = validated.model_dump(exclude={"approved"})
+    # The gate is now answered either way, so retire this cycle before branching.
+    ctx.state["validation_cycles"] = cycle
+
+    if validated.cancel:
+        logger.info("Intake cancelled by human (cycle %d): %s", cycle, brief_data)
+        # The coordinator is not re-invoked once this tool resumes, so the node has to
+        # address the user itself or the turn ends in silence. `content` is what the
+        # client renders; `output` is what the tool call returns.
+        #
+        # No route either: every outgoing edge of this node is gated on 'searches', so
+        # an unrouted event ends the workflow here without searching. The declined
+        # parameters are deliberately not written to company_brief.
+        return Event(
+            content=types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=REJECTED_MESSAGE)],
+            ),
+            output={
+                "status": REJECTED_STATUS,
+                "rejected_parameters": brief_data,
+                "message": REJECTED_MESSAGE,
+            },
+        )
+
+    confirmed_brief = validated.model_dump(exclude={"cancel"})
     ctx.state["company_brief"] = confirmed_brief
-    logger.info("Intake validated by human: %s", confirmed_brief)
+    logger.info("Intake validated by human (cycle %d): %s", cycle, confirmed_brief)
 
     return Event(output=confirmed_brief, actions=EventActions(route="searches"))
-
-
-def _extract_text_input(node_input: Any, ctx: Context) -> str:
-    """Safely extracts a clean string from node_input, falling back to original_input in state.
-
-    Args:
-        node_input: Input passed to the node.
-        ctx: The ADK workflow context.
-
-    Returns:
-        Extracted string query.
-    """
-    if isinstance(node_input, Event):
-        raw_msg = node_input.message or ctx.state.get("original_input", "")
-        if isinstance(raw_msg, str):
-            return raw_msg
-        elif hasattr(raw_msg, "parts") and raw_msg.parts:
-            return "".join(part.text for part in raw_msg.parts if getattr(part, "text", None))
-    elif hasattr(node_input, "parts") and getattr(node_input, "parts", None):
-        return "".join(part.text for part in node_input.parts if getattr(part, "text", None))
-    return str(node_input) if node_input is not None else ctx.state.get("original_input", "")
 
 
 def run_web_search(ctx: Context) -> list[SearchResultItem]:

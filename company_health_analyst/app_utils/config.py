@@ -1,6 +1,7 @@
 import os
 
 from dotenv import load_dotenv
+from google.genai import types
 
 load_dotenv()
 
@@ -16,3 +17,8 @@ GCP_PROJECT_ID = (
 GCP_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION") or os.getenv("GCP_LOCATION") or "global"
 
 AGENT_MODEL = os.getenv("AGENT_MODEL", "gemini-3.8-flash")
+
+# Applied to every model call (coordinator and synthesizer) so that topologies are compared
+# on architecture, not per-agent tuning. MEDIUM is the gemini-3.8-flash default; that model
+# rejects MINIMAL.
+THINKING_LEVEL = types.ThinkingLevel(os.getenv("THINKING_LEVEL", "MEDIUM").upper())

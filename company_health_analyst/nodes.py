@@ -1,0 +1,359 @@
+import json
+import logging
+from typing import Any
+
+from google import genai
+from google.adk import Event
+from google.adk.agents.context import Context
+from google.adk.events.event_actions import EventActions
+from google.adk.events.request_input import RequestInput
+from google.adk.workflow import node
+from google.genai import types
+from pydantic import BaseModel
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from company_health_analyst.app_utils.config import AGENT_MODEL, GCP_LOCATION, GCP_PROJECT_ID
+from company_health_analyst.prompts import PromptTemplate
+from company_health_analyst.schemas import (
+    IntakeValidationResponse,
+    IntentCategory,
+    IntentClassification,
+    SearchResultItem,
+)
+from company_health_analyst.services import (
+    MockInternalService,
+    MockSearchService,
+)
+from company_health_analyst.subagents import (
+    explanation_agent,
+    intake_agent,
+)
+
+logger = logging.getLogger(__name__)
+
+_genai_client: genai.Client | None = None
+
+
+def _get_genai_client() -> genai.Client:
+    """Returns a singleton genai.Client initialized from environment ADC."""
+    global _genai_client
+    if _genai_client is None:
+        _genai_client = genai.Client(
+            vertexai=True,
+            project=GCP_PROJECT_ID or None,
+            location=GCP_LOCATION or None,
+        )
+    return _genai_client
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+async def classify_intent_async(query: str) -> IntentCategory:
+    """Classifies user query intent using Vertex AI without mutating session event history.
+
+    Args:
+        query: The raw string query from the user.
+
+    Returns:
+        The classified IntentCategory enum.
+    """
+    client = _get_genai_client()
+    response = await client.aio.models.generate_content(
+        model=AGENT_MODEL,
+        contents=f"Classify user query: {query}",
+        config=types.GenerateContentConfig(
+            system_instruction=PromptTemplate.INTENT_CLASSIFIER,
+            response_mime_type="application/json",
+            response_schema=IntentClassification,
+            thinking_config=types.ThinkingConfig(
+                thinking_level=types.ThinkingLevel.MINIMAL,
+            ),
+        ),
+    )
+    if response.parsed and isinstance(response.parsed, IntentClassification):
+        return response.parsed.intent
+
+    if response.text:
+        data = json.loads(response.text)
+        return IntentCategory(data.get("intent", IntentCategory.FALLBACK.value))
+
+    return IntentCategory.FALLBACK
+
+
+async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
+    """Routes incoming user requests to subagents and triggers validation on task completion.
+
+    Args:
+        node_input: The incoming user message from START.
+        ctx: The ADK workflow context.
+
+    Returns:
+        Event with route='validate_intake' and output=CompanyBrief when intake completes its task,
+        or None when the turn is conversational and awaiting further user input.
+    """
+    is_report_created = ctx.state.get("is_report_created", False)
+    has_brief = bool(ctx.state.get("company_brief"))
+    query = _extract_text_input(node_input, ctx)
+
+    if is_report_created or has_brief:
+        try:
+            intent = await classify_intent_async(query)
+        except Exception as exc:
+            logger.warning("Intent classification failed: %s. Falling back to explanation.", exc)
+            intent = IntentCategory.FALLBACK
+
+        logger.info(
+            "Classified intent as: %s for query: '%s' (is_report_created=%s, has_brief=%s)",
+            intent,
+            query,
+            is_report_created,
+            has_brief,
+        )
+        if intent in (IntentCategory.GENERATE_REPORT, IntentCategory.MODIFY):
+            ctx.state["is_report_created"] = False
+            # Needed for task mode to treat a fresh cycle when modification happens
+            # after an analysis has already run or after initial parameters were captured
+            intake_cycle = ctx.state.get("intake_cycle", 1) + 1
+            ctx.state["intake_cycle"] = intake_cycle
+            run_id = f"intake_cycle_{intake_cycle}"
+            res = await ctx.run_node(
+                intake_agent, node_input=query, use_as_output=True, run_id=run_id
+            )
+            if res is not None:
+                brief = res.model_dump() if isinstance(res, BaseModel) else res
+                ctx.state["company_brief"] = brief
+                return Event(output=brief, actions=EventActions(route="validate_intake"))
+            return None
+        elif intent == IntentCategory.CONFIRM_REPORT:
+            if not is_report_created:
+                ctx.state["intake_confirmed_by_chat"] = True
+                brief = ctx.state.get("company_brief", {})
+                return Event(output=brief, actions=EventActions(route="validate_intake"))
+            else:
+                await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
+                return None
+        else:
+            await ctx.run_node(explanation_agent, node_input=query, use_as_output=True)
+            return None
+    else:
+        intake_cycle = ctx.state.get("intake_cycle", 1)
+        run_id = f"intake_cycle_{intake_cycle}"
+        res = await ctx.run_node(intake_agent, node_input=query, use_as_output=True, run_id=run_id)
+        if res is not None:
+            brief = res.model_dump() if isinstance(res, BaseModel) else res
+            ctx.state["company_brief"] = brief
+            return Event(output=brief, actions=EventActions(route="validate_intake"))
+        return None
+
+
+@node(name="validate_intake_node", rerun_on_resume=True)
+async def validate_intake_node(node_input: Any, ctx: Context) -> Event | RequestInput | None:
+    """Validates captured company brief with human-in-the-loop before searches begin.
+
+    Args:
+        node_input: The output from the intake agent (CompanyBrief or dict).
+        ctx: The ADK workflow context.
+
+    Returns:
+        RequestInput when awaiting human approval/edits, or Event with route='searches'
+        and validated output upon confirmation.
+    """
+    brief_data = ctx.state.get("company_brief") or node_input or {}
+    if isinstance(brief_data, BaseModel):
+        brief_data = brief_data.model_dump()
+
+    intake_cycle = ctx.state.get("intake_cycle", 1)
+    interrupt_id = f"validate_captured_brief_{intake_cycle}"
+
+    # Step 1: Interrupt if human input is not yet received
+    if (not ctx.resume_inputs or interrupt_id not in ctx.resume_inputs) and not ctx.state.get(
+        "intake_confirmed_by_chat"
+    ):
+        company_name = brief_data.get("company_name", "")
+        time_span = brief_data.get("time_span", "")
+        region = brief_data.get("region", "")
+        msg = (
+            "Please review and confirm the captured company parameters before analysis begins:\n"
+            f"- Company Name: {company_name}\n"
+            f"- Timeframe: {time_span}\n"
+            f"- Region: {region}"
+        )
+        return RequestInput(
+            interrupt_id=interrupt_id,
+            message=msg,
+            payload=brief_data,
+            response_schema=IntakeValidationResponse,
+        )
+
+    # Step 2: Resume with human validation input
+    ctx.state["intake_confirmed_by_chat"] = False
+    resume_data = (ctx.resume_inputs or {}).get(interrupt_id)
+    if isinstance(resume_data, IntakeValidationResponse):
+        validated = resume_data
+    elif isinstance(resume_data, dict):
+        # Filter out empty or null values so blank form fields in the UI
+        # do not overwrite the captured parameters from intake.
+        overrides = {
+            k: v
+            for k, v in resume_data.items()
+            if v is not None and (not isinstance(v, str) or v.strip() != "")
+        }
+        merged = {**brief_data, **overrides}
+        validated = IntakeValidationResponse(**merged)
+    else:
+        validated = IntakeValidationResponse(**brief_data)
+
+    confirmed_brief = validated.model_dump(exclude={"approved"})
+    ctx.state["company_brief"] = confirmed_brief
+    logger.info("Intake validated by human: %s", confirmed_brief)
+
+    return Event(output=confirmed_brief, actions=EventActions(route="searches"))
+
+
+def _extract_text_input(node_input: Any, ctx: Context) -> str:
+    """Safely extracts a clean string from node_input, falling back to original_input in state.
+
+    Args:
+        node_input: Input passed to the node.
+        ctx: The ADK workflow context.
+
+    Returns:
+        Extracted string query.
+    """
+    if isinstance(node_input, Event):
+        raw_msg = node_input.message or ctx.state.get("original_input", "")
+        if isinstance(raw_msg, str):
+            return raw_msg
+        elif hasattr(raw_msg, "parts") and raw_msg.parts:
+            return "".join(part.text for part in raw_msg.parts if getattr(part, "text", None))
+    elif hasattr(node_input, "parts") and getattr(node_input, "parts", None):
+        return "".join(part.text for part in node_input.parts if getattr(part, "text", None))
+    return str(node_input) if node_input is not None else ctx.state.get("original_input", "")
+
+
+def run_web_search(ctx: Context) -> list[SearchResultItem]:
+    """Deterministic node fetching public corporate filings and news.
+
+    Args:
+        ctx: The ADK workflow context.
+
+    Returns:
+        List of web search result items.
+    """
+    brief = ctx.state.get("company_brief", {})
+    if isinstance(brief, BaseModel):
+        brief = brief.model_dump()
+
+    company = brief.get("company_name", "")
+    region = brief.get("region", "")
+    time_span = brief.get("time_span", "")
+
+    results = MockSearchService.search_web(
+        company=company,
+        region=region,
+        time_span=time_span,
+    )
+    logger.info("run_web_search returned %d items for company '%s'.", len(results), company)
+    return results
+
+
+def run_internal_search(ctx: Context) -> list[SearchResultItem]:
+    """Deterministic node fetching internal company reports and financial archives.
+
+    Args:
+        ctx: The ADK workflow context.
+
+    Returns:
+        List of internal database search result items.
+    """
+    brief = ctx.state.get("company_brief", {})
+    if isinstance(brief, BaseModel):
+        brief = brief.model_dump()
+
+    company = brief.get("company_name", "")
+    region = brief.get("region", "")
+    time_span = brief.get("time_span", "")
+
+    results = MockInternalService.search_internal(
+        company=company,
+        region=region,
+        time_span=time_span,
+    )
+    logger.info(
+        "run_internal_search returned %d items for company '%s'.",
+        len(results),
+        company,
+    )
+    return results
+
+
+def format_search_inputs(node_input: dict[str, Any], ctx: Context) -> str:
+    """Formats parallel search outputs into a text prompt for the synthesizer.
+
+    Args:
+        node_input: Dictionary of outputs from upstream search nodes keyed by node name.
+        ctx: The ADK workflow context.
+
+    Returns:
+        Formatted text string of search results for the synthesizer agent.
+    """
+    web_items: list[Any] = node_input.get("run_web_search", [])
+    internal_items: list[Any] = node_input.get("run_internal_search", [])
+
+    ctx.state["search_results"] = {
+        "web": [item.model_dump() if hasattr(item, "model_dump") else item for item in web_items],
+        "internal": [
+            item.model_dump() if hasattr(item, "model_dump") else item for item in internal_items
+        ],
+    }
+
+    prompt_sections: list[str] = ["### PUBLIC WEB SEARCH RESULTS:"]
+    for i, item in enumerate(web_items):
+        title = getattr(item, "title", str(item))
+        snippet = getattr(item, "snippet", "")
+        url = getattr(item, "url", "N/A") or "N/A"
+        prompt_sections.append(f"{i + 1}. **{title}**\n   {snippet}\n   URL: {url}")
+
+    prompt_sections.append("\n### INTERNAL DATABASE SEARCH RESULTS:")
+    for i, item in enumerate(internal_items):
+        title = getattr(item, "title", str(item))
+        snippet = getattr(item, "snippet", "")
+        prompt_sections.append(f"{i + 1}. **{title}**\n   {snippet}")
+
+    formatted_text = "\n".join(prompt_sections)
+    return formatted_text
+
+
+def save_report_to_db(node_input: Any, ctx: Context) -> str:
+    """Saves the synthesized report to state/db and marks report as complete.
+
+    Args:
+        node_input: Output from report_synthesizer_agent (Event, types.Content, or str).
+        ctx: The ADK workflow context.
+
+    Returns:
+        The markdown string of the synthesized report.
+    """
+    report_text = ""
+    if isinstance(node_input, Event):
+        report_text = str(node_input.output or "")
+    elif isinstance(node_input, types.Content):
+        parts = node_input.parts or []
+        report_text = "".join(part.text or "" for part in parts if getattr(part, "text", None))
+    elif hasattr(node_input, "parts"):
+        parts_list = getattr(node_input, "parts") or []
+        report_text = "".join(
+            getattr(part, "text", "") or "" for part in parts_list if getattr(part, "text", None)
+        )
+    else:
+        report_text = str(node_input)
+
+    ctx.state["report_markdown"] = report_text
+    ctx.state["is_report_created"] = True
+
+    logger.info("Report saved to state context successfully.")
+    return report_text

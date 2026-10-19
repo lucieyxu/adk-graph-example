@@ -1,0 +1,57 @@
+[project]
+name = "company_health_analyst"
+version = "0.1.0"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "pydantic>=2.12.0",
+    "google-genai>=1.56.0",
+    "google-cloud-aiplatform[agent-engines,evaluation,reasoningengine]>=1.156.0,<2.0.0",
+    "google-adk[bigquery-analytics,eval,gcp,otel-gcp]>=2.9.2,<3.0.0",
+    "google-agents-cli",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+    "opentelemetry-resourcedetector-gcp<=1.12.0a0",
+    "gcsfs>=2024.11.0",
+    "aiohttp>=3.13.4",
+    "a2a-sdk[http-server]>=1.0,<2",
+    "google-cloud-logging>=3.12.0,<4.0.0",
+    "protobuf>=6.31.1,<7.0.0",
+]
+requires-python = "~=3.13.0"
+
+[project.optional-dependencies]
+eval = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+lint = [
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true
+
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+ignore_missing_imports = true
+python_version = "3.13"
+exclude = ["^tests/"]
+
+
+[[tool.mypy.overrides]]
+module = "a2a.*"
+ignore_missing_imports = true
+follow_untyped_imports = true

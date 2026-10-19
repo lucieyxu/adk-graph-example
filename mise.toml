@@ -1,0 +1,11 @@
+[tools]
+python = { version = "3.13", virtualenv = ".venv" }
+
+[env]
+_.python.venv = { create = true, path = ".venv" }
+
+[settings]
+python.uv_venv_auto = true
+
+[tasks]
+lint = "ruff clean && ruff check ."

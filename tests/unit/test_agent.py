@@ -1,5 +1,5 @@
 import os
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -10,14 +10,22 @@ os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 
 
 from google.adk import Event
+from google.adk.agents import LlmAgent
 from google.adk.agents.context import Context
 from google.adk.events.request_input import RequestInput
-from google.adk.workflow import Workflow
+from google.adk.tools._node_tool import NodeTool
+from google.adk.tools.tool_context import ToolContext
+from google.adk.workflow import START, Workflow
 
-from company_health_analyst.graph import root_agent
+from company_health_analyst.graph import (
+    PIPELINE_TOOL_NAME,
+    company_health_pipeline,
+    root_agent,
+    skip_report_summarization,
+)
 from company_health_analyst.nodes import (
+    REJECTED_STATUS,
     format_search_inputs,
-    route_user_request,
     run_internal_search,
     run_web_search,
     save_report_to_db,
@@ -25,216 +33,354 @@ from company_health_analyst.nodes import (
 )
 from company_health_analyst.prompts import PromptTemplate
 from company_health_analyst.schemas import (
-    CompanyBrief,
     IntakeValidationResponse,
-    IntentCategory,
+    PipelineInput,
     SearchResultItem,
 )
-from company_health_analyst.subagents import explanation_agent, intake_agent
 
 
-def test_intake_agent_configuration():
-    """Verify intake_agent is configured in task mode with CompanyBrief schema."""
-    assert intake_agent.mode == "task"
-    assert intake_agent.output_schema == CompanyBrief
-    assert intake_agent.output_key == "company_brief"
-
-    # In task mode, ADK automatically injects the finish_task tool
-    tool_names = [getattr(t, "name", getattr(t, "__name__", str(t))) for t in intake_agent.tools]
-    assert "finish_task" in tool_names
+def _ctx(state: dict, resume_inputs: dict | None = None) -> Context:
+    """Builds a mock workflow Context with the given state and resume inputs."""
+    ctx = MagicMock(spec=Context)
+    ctx.state = state
+    ctx.resume_inputs = resume_inputs or {}
+    return ctx
 
 
-def test_workflow_graph_structure():
-    """Verify the workflow topology uses route_user_request as the entry point."""
-    assert isinstance(root_agent, Workflow)
-    assert root_agent.name == "company_health_analyst_workflow"
+# --- Topology -----------------------------------------------------------------
 
-    # Check edges exist and START connects to route_user_request
-    assert root_agent.edges is not None
-    assert len(root_agent.edges) > 0
-    assert root_agent.edges[0][0] == "START"
+
+def test_root_agent_is_conversational_coordinator():
+    """Verify the root agent is an LlmAgent, not the workflow itself."""
+    assert isinstance(root_agent, LlmAgent)
+    assert root_agent.name == "company_health_coordinator"
+
+
+def test_root_agent_exposes_pipeline_as_node_tool():
+    """Verify the pipeline Workflow is attached to the root agent as a NodeTool."""
+    pipeline_tools = [t for t in root_agent.tools if isinstance(t, NodeTool)]
+    assert len(pipeline_tools) == 1
+
+    tool = pipeline_tools[0]
+    assert tool.name == PIPELINE_TOOL_NAME
+    assert tool.node is company_health_pipeline
+    # Long-running is what lets a HITL interrupt inside the graph pause the invocation.
+    assert tool.is_long_running is True
+
+
+def test_pipeline_tool_declaration_matches_pipeline_input():
+    """Verify the tool declaration the model sees is derived from PipelineInput."""
+    tool = next(t for t in root_agent.tools if isinstance(t, NodeTool))
+    declaration = tool._get_declaration()
+    assert declaration is not None
+
+    schema = declaration.parameters_json_schema
+    assert isinstance(schema, dict)
+    assert set(schema["required"]) == {"company_name", "time_span", "region"}
+    assert set(schema["properties"]) == {"company_name", "time_span", "region"}
+
+
+def test_root_agent_exposes_context_tools():
+    """Verify the coordinator can answer Q&A itself via the context lookup tools."""
+    names = [getattr(t, "name", getattr(t, "__name__", "")) for t in root_agent.tools]
+    assert "fetch_report_context" in names
+    assert "search_previous_reports" in names
+
+
+def test_pipeline_graph_structure():
+    """Verify the pipeline is a Workflow entered at the HITL validation node."""
+    assert isinstance(company_health_pipeline, Workflow)
+    assert company_health_pipeline.name == PIPELINE_TOOL_NAME
+    assert company_health_pipeline.input_schema is PipelineInput
+
+    graph = company_health_pipeline.graph
+    assert graph is not None
+    entry_nodes = [e.to_node.name for e in graph.edges if e.from_node.name == START.name]
+    assert entry_nodes == ["validate_intake_node"]
+
+    # The searches only run on the route the HITL node emits once a human confirms.
+    search_edges = [e for e in graph.edges if e.from_node.name == "validate_intake_node"]
+    assert {e.to_node.name for e in search_edges} == {"run_web_search", "run_internal_search"}
+    assert all(e.route == "searches" for e in search_edges)
+
+
+# --- Report delivery ----------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_route_user_request_pre_report_conversational():
-    """Verify route_user_request returns None when intake_agent is still conversing."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {"is_report_created": False}
-    mock_ctx.run_node = AsyncMock(return_value=None)
+async def test_skip_report_summarization_applies_to_pipeline_tool():
+    """Verify the coordinator is told not to re-narrate the streamed report."""
+    tool = MagicMock()
+    tool.name = PIPELINE_TOOL_NAME
+    tool_context = MagicMock(spec=ToolContext)
+    tool_context.actions = MagicMock()
 
-    event = await route_user_request("Analyze Nike", mock_ctx)
-    assert event is None
-    mock_ctx.run_node.assert_called_once_with(
-        intake_agent, node_input="Analyze Nike", use_as_output=True, run_id="intake_cycle_1"
-    )
+    result = await skip_report_summarization(tool, {}, tool_context, {})
 
-
-@pytest.mark.asyncio
-async def test_route_user_request_pre_report_completed():
-    """Verify route_user_request routes to 'validate_intake' when intake completes task."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {"is_report_created": False}
-    completed_brief = {"company_name": "Nike", "region": "US", "time_span": "2025"}
-    mock_ctx.run_node = AsyncMock(return_value=completed_brief)
-
-    event = await route_user_request("US and 2025", mock_ctx)
-    assert isinstance(event, Event)
-    assert event.actions.route == "validate_intake"
-    assert event.output == completed_brief
-    assert mock_ctx.state["company_brief"] == completed_brief
+    assert result is None
+    assert tool_context.actions.skip_summarization is True
 
 
 @pytest.mark.asyncio
-async def test_validate_intake_node_interrupts_when_not_resumed():
-    """Verify validate_intake_node yields RequestInput if no resume input exists."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.resume_inputs = {}
-    mock_ctx.state = {
-        "company_brief": {"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"}
-    }
+async def test_skip_report_summarization_leaves_other_tools_alone():
+    """Verify ordinary Q&A tool results are still summarized by the coordinator."""
+    tool = MagicMock()
+    tool.name = "search_previous_reports"
+    tool_context = MagicMock(spec=ToolContext)
+    tool_context.actions = MagicMock()
+    tool_context.actions.skip_summarization = None
 
-    req = await validate_intake_node._func(None, mock_ctx)
+    await skip_report_summarization(tool, {}, tool_context, {})
+
+    assert tool_context.actions.skip_summarization is not True
+
+
+# --- HITL validation node -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_interrupts_on_pipeline_input():
+    """Verify the entry node interrupts with the tool arguments the coordinator passed."""
+    ctx = _ctx(state={})
+    node_input = PipelineInput(company_name="Alphabet", time_span="Q1 2026", region="US")
+
+    req = await validate_intake_node._func(node_input, ctx)
+
     assert isinstance(req, RequestInput)
     assert req.interrupt_id == "validate_captured_brief_1"
     assert req.response_schema == IntakeValidationResponse
-    assert "Alphabet" in req.message
+    assert "Alphabet" in (req.message or "")
 
 
 @pytest.mark.asyncio
 async def test_validate_intake_node_resumes_and_routes_searches():
-    """Verify validate_intake_node routes to 'searches' and updates state on resume."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {
-        "company_brief": {"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"}
-    }
-    mock_ctx.resume_inputs = {
-        "validate_captured_brief_1": {
-            "approved": True,
-            "company_name": "Alphabet",
-            "time_span": "Q1 2026",
-            "region": "Europe",
-        }
-    }
+    """Verify the node routes to 'searches' and applies human overrides on resume."""
+    ctx = _ctx(
+        state={},
+        resume_inputs={
+            "validate_captured_brief_1": {
+                "cancel": False,
+                "region": "Europe",
+            }
+        },
+    )
+    node_input = PipelineInput(company_name="Alphabet", time_span="Q1 2026", region="US")
 
-    event = await validate_intake_node._func(None, mock_ctx)
+    event = await validate_intake_node._func(node_input, ctx)
+
     assert isinstance(event, Event)
     assert event.actions.route == "searches"
-    assert mock_ctx.state["company_brief"]["region"] == "Europe"
+    assert ctx.state["company_brief"]["region"] == "Europe"
+    assert ctx.state["company_brief"]["company_name"] == "Alphabet"
 
 
 @pytest.mark.asyncio
-async def test_validate_intake_node_resumes_with_blank_form_preserves_captured():
-    """Verify validate_intake_node preserves captured brief when form submitted blank (nulls)."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {
-        "company_brief": {"company_name": "Alphabet", "time_span": "Q1 2026", "region": "US"}
+async def test_validate_intake_node_accepts_the_exact_web_ui_submit_payload():
+    """Verify pressing Submit untouched in the ADK Web UI proceeds with the analysis.
+
+    Regression guard, reproducing a payload captured from a real UI session. The UI
+    renders every boolean as an unticked checkbox and posts it on every submit,
+    ignoring the field's declared default. An `approved: bool = True` field therefore
+    arrived as False on every submission and cancelled every run.
+    """
+    web_ui_submit = {
+        "company_name": None,
+        "time_span": None,
+        "region": None,
+        "summary": None,
+        "cancel": False,
     }
-    mock_ctx.resume_inputs = {
-        "validate_captured_brief_1": {
-            "approved": True,
-            "company_name": None,
-            "time_span": None,
-            "region": None,
-            "summary": None,
-        }
-    }
+    ctx = _ctx(state={}, resume_inputs={"validate_captured_brief_1": web_ui_submit})
+    node_input = PipelineInput(company_name="Alphabet", time_span="Q1 2026", region="US")
 
-    event = await validate_intake_node._func(None, mock_ctx)
+    event = await validate_intake_node._func(node_input, ctx)
+
     assert isinstance(event, Event)
-    assert event.actions.route == "searches"
-    assert mock_ctx.state["company_brief"]["company_name"] == "Alphabet"
-    assert mock_ctx.state["company_brief"]["time_span"] == "Q1 2026"
-    assert mock_ctx.state["company_brief"]["region"] == "US"
+    assert event.actions.route == "searches", (
+        "Pressing Submit without editing the form must run the analysis."
+    )
+    assert ctx.state["company_brief"]["company_name"] == "Alphabet"
+
+
+def test_validation_form_has_no_boolean_that_submit_cannot_express():
+    """Verify no boolean on the form needs to be True for the happy path.
+
+    The Web UI cannot post a ticked checkbox from an untouched form, so any boolean
+    whose required value is True is unreachable by a plain Submit.
+    """
+    for name, field in IntakeValidationResponse.model_fields.items():
+        if field.annotation is bool:
+            assert field.default is False, (
+                f"Boolean form field {name!r} defaults to {field.default!r}; the Web UI "
+                "always submits False for it, so the default must be False."
+            )
 
 
 @pytest.mark.asyncio
-async def test_route_user_request_post_report_explanation(monkeypatch):
-    """Verify route_user_request runs explanation_agent for analytical Q&A on existing report."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {"is_report_created": True}
-    mock_ctx.run_node = AsyncMock(return_value=None)
-
-    monkeypatch.setattr(
-        "company_health_analyst.nodes.classify_intent_async",
-        AsyncMock(return_value=IntentCategory.ASK_EXPLANATION),
+async def test_validate_intake_node_blank_form_preserves_captured_values():
+    """Verify blank form fields do not wipe the parameters the coordinator captured."""
+    ctx = _ctx(
+        state={},
+        resume_inputs={
+            "validate_captured_brief_1": {
+                "cancel": False,
+                "company_name": None,
+                "time_span": "",
+                "region": "   ",
+                "summary": None,
+            }
+        },
     )
+    node_input = PipelineInput(company_name="Alphabet", time_span="Q1 2026", region="US")
 
-    event = await route_user_request("explain in more details the risk factors", mock_ctx)
-    assert event is None
-    mock_ctx.run_node.assert_called_once_with(
-        explanation_agent,
-        node_input="explain in more details the risk factors",
-        use_as_output=True,
-    )
+    event = await validate_intake_node._func(node_input, ctx)
+
+    assert isinstance(event, Event)
+    assert ctx.state["company_brief"]["company_name"] == "Alphabet"
+    assert ctx.state["company_brief"]["time_span"] == "Q1 2026"
+    assert ctx.state["company_brief"]["region"] == "US"
 
 
 @pytest.mark.asyncio
-async def test_route_user_request_post_report_modify(monkeypatch):
-    """Verify route_user_request resets report flag and runs intake_agent on modify."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {"is_report_created": True}
-    completed_brief = {"company_name": "Nike", "region": "Europe", "time_span": "2025"}
-    mock_ctx.run_node = AsyncMock(return_value=completed_brief)
-
-    monkeypatch.setattr(
-        "company_health_analyst.nodes.classify_intent_async",
-        AsyncMock(return_value=IntentCategory.MODIFY),
+async def test_validate_intake_node_confirmation_advances_cycle():
+    """Verify confirming a run advances the cycle counter so the next run re-asks."""
+    ctx = _ctx(
+        state={},
+        resume_inputs={"validate_captured_brief_1": {"cancel": False}},
     )
+    node_input = PipelineInput(company_name="XYZ", time_span="2025", region="US")
 
-    event = await route_user_request("change the analysis to Europe now", mock_ctx)
-    assert isinstance(event, Event)
-    assert event.actions.route == "validate_intake"
-    assert mock_ctx.state["is_report_created"] is False
-    assert mock_ctx.state["company_brief"] == completed_brief
-    mock_ctx.run_node.assert_called_once_with(
-        intake_agent,
-        node_input="change the analysis to Europe now",
-        use_as_output=True,
-        run_id="intake_cycle_2",
-    )
+    await validate_intake_node._func(node_input, ctx)
+    assert ctx.state["validation_cycles"] == 1
 
 
 @pytest.mark.asyncio
-async def test_route_user_request_multiple_modify_cycles(monkeypatch):
-    """Verify route_user_request increments intake_cycle across repeated modifications."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {"is_report_created": True, "intake_cycle": 2}
-    completed_brief = {"company_name": "Nike", "region": "Asia", "time_span": "2026"}
-    mock_ctx.run_node = AsyncMock(return_value=completed_brief)
+async def test_validate_intake_node_declined_run_does_not_search():
+    """Verify declining the form aborts the run instead of analyzing anyway.
 
-    monkeypatch.setattr(
-        "company_health_analyst.nodes.classify_intent_async",
-        AsyncMock(return_value=IntentCategory.MODIFY),
+    `cancel` used to be dropped on the floor, so a cancellation still ran the
+    full analysis.
+    """
+    ctx = _ctx(
+        state={},
+        resume_inputs={"validate_captured_brief_1": {"cancel": True}},
     )
+    node_input = PipelineInput(company_name="XYZ", time_span="2025", region="US")
 
-    event = await route_user_request("change the analysis to Asia now", mock_ctx)
+    event = await validate_intake_node._func(node_input, ctx)
+
     assert isinstance(event, Event)
-    assert mock_ctx.state["intake_cycle"] == 3
-    mock_ctx.run_node.assert_called_once_with(
-        intake_agent,
-        node_input="change the analysis to Asia now",
-        use_as_output=True,
-        run_id="intake_cycle_3",
+    # No route means no outgoing edge matches, so the searches never trigger.
+    assert event.actions.route is None
+    assert isinstance(event.output, dict)
+    assert event.output["status"] == REJECTED_STATUS
+    assert event.output["rejected_parameters"]["company_name"] == "XYZ"
+
+    # Declined parameters must not become the active brief.
+    assert "company_brief" not in ctx.state
+
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_declined_run_tells_the_user():
+    """Verify the declined run speaks for itself.
+
+    The coordinator is not invoked again when the pipeline ends at the gate, so
+    without content on this event the turn would finish in silence.
+    """
+    ctx = _ctx(
+        state={},
+        resume_inputs={"validate_captured_brief_1": {"cancel": True}},
+    )
+    node_input = PipelineInput(company_name="XYZ", time_span="2025", region="US")
+
+    event = await validate_intake_node._func(node_input, ctx)
+
+    assert isinstance(event, Event)
+    assert event.content is not None
+    assert event.content.parts is not None
+    assert any(p.text for p in event.content.parts)
+
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_retry_after_decline_asks_again():
+    """Verify a declined run's answer cannot auto-decline the retry.
+
+    The decline must retire its cycle too. If only approvals advanced the counter,
+    the retry would reuse interrupt ID 1, rediscover this same `cancel=True` in
+    resume_inputs, and decline itself forever without asking the human.
+    """
+    ctx = _ctx(
+        state={},
+        resume_inputs={"validate_captured_brief_1": {"cancel": True}},
+    )
+    await validate_intake_node._func(
+        PipelineInput(company_name="XYZ", time_span="2025", region="US"), ctx
+    )
+    assert ctx.state["validation_cycles"] == 1
+
+    # The retry carries the earlier rejection along in resume_inputs.
+    retry = await validate_intake_node._func(
+        PipelineInput(company_name="XYZ", time_span="2025", region="Asia"), ctx
     )
 
+    assert isinstance(retry, RequestInput)
+    assert retry.interrupt_id == "validate_captured_brief_2"
 
-def test_company_brief_schema_validation():
-    """Verify CompanyBrief requires mandatory parameters for task completion."""
-    brief = CompanyBrief(company_name="Alphabet", time_span="Q1 2026", region="US")
-    assert brief.company_name == "Alphabet"
-    assert brief.time_span == "Q1 2026"
-    assert brief.region == "US"
-    assert brief.summary is None
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_second_run_requires_fresh_confirmation():
+    """Verify a stale answer from cycle 1 cannot auto-confirm cycle 2.
+
+    This is the regression guard for reusing a static interrupt ID: the previous
+    cycle's response stays in resume_inputs, and must not be mistaken for this one.
+    """
+    ctx = _ctx(
+        state={"validation_cycles": 1},
+        resume_inputs={"validate_captured_brief_1": {"cancel": False}},
+    )
+    node_input = PipelineInput(company_name="XYZ", time_span="2025", region="Asia")
+
+    req = await validate_intake_node._func(node_input, ctx)
+
+    assert isinstance(req, RequestInput)
+    assert req.interrupt_id == "validate_captured_brief_2"
+
+
+@pytest.mark.asyncio
+async def test_validate_intake_node_falls_back_to_state_brief():
+    """Verify the node still works when rerun without usable node input."""
+    ctx = _ctx(
+        state={"company_brief": {"company_name": "XYZ", "time_span": "2025", "region": "US"}}
+    )
+
+    req = await validate_intake_node._func(None, ctx)
+
+    assert isinstance(req, RequestInput)
+    assert "XYZ" in (req.message or "")
+
+
+# --- Schemas ------------------------------------------------------------------
+
+
+def test_pipeline_input_requires_all_three_parameters():
+    """Verify PipelineInput makes the three analysis parameters mandatory."""
+    payload = PipelineInput(company_name="Alphabet", time_span="Q1 2026", region="US")
+    assert payload.company_name == "Alphabet"
+
+    with pytest.raises(ValueError):
+        PipelineInput.model_validate({"company_name": "Alphabet", "time_span": "Q1 2026"})
+
+
+# --- Deterministic pipeline nodes ---------------------------------------------
 
 
 def test_run_web_search():
     """Verify run_web_search fetches mock search snippets based on state brief."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {
-        "company_brief": {"company_name": "XYZ", "region": "Europe", "time_span": "2025"}
-    }
+    ctx = _ctx(
+        state={"company_brief": {"company_name": "XYZ", "region": "Europe", "time_span": "2025"}}
+    )
 
-    results = run_web_search(mock_ctx)
+    results = run_web_search(ctx)
     assert len(results) >= 1
     assert "XYZ" in results[0].title
     assert "europe" in results[0].title.lower()
@@ -243,12 +389,11 @@ def test_run_web_search():
 
 def test_run_internal_search():
     """Verify run_internal_search fetches mock internal logs based on state brief."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {
-        "company_brief": {"company_name": "XYZ", "region": "Europe", "time_span": "2025"}
-    }
+    ctx = _ctx(
+        state={"company_brief": {"company_name": "XYZ", "region": "Europe", "time_span": "2025"}}
+    )
 
-    results = run_internal_search(mock_ctx)
+    results = run_internal_search(ctx)
     assert len(results) >= 1
     assert "XYZ Internal" in results[0].title
     assert results[0].source_type == "internal"
@@ -256,8 +401,7 @@ def test_run_internal_search():
 
 def test_format_search_inputs():
     """Verify format_search_inputs formats joined search outputs as a single text."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {}
+    ctx = _ctx(state={})
 
     node_input = {
         "run_web_search": [
@@ -272,7 +416,7 @@ def test_format_search_inputs():
         ],
     }
 
-    text = format_search_inputs(node_input, mock_ctx)
+    text = format_search_inputs(node_input, ctx)
     assert isinstance(text, str)
 
     assert "PUBLIC WEB SEARCH RESULTS" in text
@@ -280,103 +424,46 @@ def test_format_search_inputs():
     assert "Web Title" in text
     assert "Internal Title" in text
 
-    # State should contain raw results dict
-    assert "search_results" in mock_ctx.state
-    assert len(mock_ctx.state["search_results"]["web"]) == 1
+    assert "search_results" in ctx.state
+    assert len(ctx.state["search_results"]["web"]) == 1
 
 
 def test_save_report_to_db():
     """Verify save_report_to_db stores markdown report in state and updates created indicator."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {
-        "company_brief": {"company_name": "XYZ", "time_span": "2025", "region": "Europe"}
-    }
+    ctx = _ctx(
+        state={"company_brief": {"company_name": "XYZ", "time_span": "2025", "region": "Europe"}}
+    )
 
     report_md = "# Health Report for Nike"
-    result = save_report_to_db(report_md, mock_ctx)
+    result = save_report_to_db(report_md, ctx)
 
     assert result == report_md
-    assert mock_ctx.state["report_markdown"] == report_md
-    assert mock_ctx.state["is_report_created"] is True
+    assert ctx.state["report_markdown"] == report_md
+    assert ctx.state["is_report_created"] is True
 
 
-def test_explanation_agent_config():
-    """Verify explanation_agent has include_contents='default' to retain history."""
-    assert explanation_agent.include_contents == "default"
-    assert "include_contents" in explanation_agent.model_fields_set
+# --- Prompt constraints -------------------------------------------------------
 
 
-def test_explanation_agent_prompt_constraints():
-    """Verify PromptTemplate.EXPLANATION_AGENT enforces anti-greeting and direct-answering rules."""
-    prompt = PromptTemplate.EXPLANATION_AGENT
+def test_coordinator_prompt_covers_intake_and_qa():
+    """Verify the merged coordinator prompt retains both intake and Q&A constraints."""
+    prompt = PromptTemplate.COORDINATOR
+
+    # Intake duties
+    assert "company_name" in prompt
+    assert "time_span" in prompt
+    assert "region" in prompt
+    assert PIPELINE_TOOL_NAME in prompt
+    assert "never invent" in prompt.lower()
+
+    # Q&A duties inherited from the former explanation agent
     assert "Do NOT greet" in prompt
-    assert "ongoing" in prompt
     assert "search_previous_reports" in prompt
     assert "fetch_report_context" in prompt
-    assert "Direct Answering" in prompt
 
 
-@pytest.mark.asyncio
-async def test_route_user_request_pre_report_hitl_question_routes_to_explanation(monkeypatch):
-    """Verify asking questions when company_brief exists routes to explanation_agent."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {
-        "is_report_created": False,
-        "company_brief": {"company_name": "XYZ", "time_span": "FY2025", "region": "Global"},
-    }
-    mock_ctx.run_node = AsyncMock(return_value=None)
-
-    monkeypatch.setattr(
-        "company_health_analyst.nodes.classify_intent_async",
-        AsyncMock(return_value=IntentCategory.ASK_EXPLANATION),
-    )
-
-    event = await route_user_request("When was the company founded and by who?", mock_ctx)
-    assert event is None
-    mock_ctx.run_node.assert_called_once_with(
-        explanation_agent,
-        node_input="When was the company founded and by who?",
-        use_as_output=True,
-    )
-
-
-@pytest.mark.asyncio
-async def test_route_user_request_pre_report_chat_confirm(monkeypatch):
-    """Verify user confirming via chat when company_brief exists routes to validate_intake."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.state = {
-        "is_report_created": False,
-        "company_brief": {"company_name": "XYZ", "time_span": "FY2025", "region": "Global"},
-    }
-
-    monkeypatch.setattr(
-        "company_health_analyst.nodes.classify_intent_async",
-        AsyncMock(return_value=IntentCategory.CONFIRM_REPORT),
-    )
-
-    event = await route_user_request("looks good, proceed", mock_ctx)
-    assert isinstance(event, Event)
-    assert event.actions.route == "validate_intake"
-    assert mock_ctx.state["intake_confirmed_by_chat"] is True
-
-
-@pytest.mark.asyncio
-async def test_validate_intake_node_chat_confirmed_skips_interrupt():
-    """Verify validate_intake_node routes to searches without interrupting when chat-confirmed."""
-    mock_ctx = MagicMock(spec=Context)
-    mock_ctx.resume_inputs = {}
-    mock_ctx.state = {
-        "company_brief": {"company_name": "XYZ", "time_span": "FY2025", "region": "Global"},
-        "intake_confirmed_by_chat": True,
-    }
-
-    event = await validate_intake_node._func(None, mock_ctx)
-    assert isinstance(event, Event)
-    assert event.actions.route == "searches"
-    assert event.output == {
-        "company_name": "XYZ",
-        "time_span": "FY2025",
-        "region": "Global",
-        "summary": None,
-    }
-    assert mock_ctx.state["intake_confirmed_by_chat"] is False
+def test_coordinator_prompt_defers_confirmation_to_the_pipeline():
+    """Verify the coordinator is told the tool owns parameter confirmation."""
+    prompt = PromptTemplate.COORDINATOR
+    assert "do NOT ask the user to confirm" in prompt
+    assert "Do not restate or summarize" in prompt

@@ -14,6 +14,7 @@ from google.adk.agents.context import Context
 from google.adk.events.request_input import RequestInput
 from google.adk.workflow import Workflow
 
+from company_health_analyst.app_utils.config import THINKING_LEVEL
 from company_health_analyst.graph import root_agent
 from company_health_analyst.nodes import (
     format_search_inputs,
@@ -30,7 +31,11 @@ from company_health_analyst.schemas import (
     IntentCategory,
     SearchResultItem,
 )
-from company_health_analyst.subagents import explanation_agent, intake_agent
+from company_health_analyst.subagents import (
+    explanation_agent,
+    intake_agent,
+    report_synthesizer_agent,
+)
 
 
 def test_intake_agent_configuration():
@@ -304,6 +309,14 @@ def test_explanation_agent_config():
     """Verify explanation_agent has include_contents='default' to retain history."""
     assert explanation_agent.include_contents == "default"
     assert "include_contents" in explanation_agent.model_fields_set
+
+
+def test_every_agent_uses_shared_thinking_level():
+    """Verify all LlmAgents think at the shared level so topologies compare like for like."""
+    for agent in (intake_agent, report_synthesizer_agent, explanation_agent):
+        assert agent.generate_content_config is not None, agent.name
+        assert agent.generate_content_config.thinking_config is not None, agent.name
+        assert agent.generate_content_config.thinking_config.thinking_level == THINKING_LEVEL
 
 
 def test_explanation_agent_prompt_constraints():

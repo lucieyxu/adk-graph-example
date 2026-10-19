@@ -1,7 +1,7 @@
 from google.adk.agents import LlmAgent
 from google.genai import types as genai_types
 
-from company_health_analyst.app_utils.config import AGENT_MODEL
+from company_health_analyst.app_utils.config import AGENT_MODEL, THINKING_LEVEL
 from company_health_analyst.prompts import PromptTemplate
 from company_health_analyst.schemas import CompanyBrief
 from company_health_analyst.tools import fetch_report_context, search_previous_reports
@@ -16,7 +16,7 @@ intake_agent = LlmAgent(
     tools=[fetch_report_context, search_previous_reports],
     generate_content_config=genai_types.GenerateContentConfig(
         thinking_config=genai_types.ThinkingConfig(
-            thinking_level=genai_types.ThinkingLevel.LOW,
+            thinking_level=THINKING_LEVEL,
         ),
     ),
 )
@@ -27,7 +27,7 @@ report_synthesizer_agent = LlmAgent(
     instruction=PromptTemplate.REPORT_SYNTHESIZER,
     generate_content_config=genai_types.GenerateContentConfig(
         thinking_config=genai_types.ThinkingConfig(
-            thinking_level=genai_types.ThinkingLevel.MEDIUM,
+            thinking_level=THINKING_LEVEL,
         ),
     ),
 )
@@ -40,7 +40,7 @@ explanation_agent = LlmAgent(
     tools=[fetch_report_context, search_previous_reports],
     generate_content_config=genai_types.GenerateContentConfig(
         thinking_config=genai_types.ThinkingConfig(
-            thinking_level=genai_types.ThinkingLevel.MEDIUM,
+            thinking_level=THINKING_LEVEL,
         ),
     ),
 )

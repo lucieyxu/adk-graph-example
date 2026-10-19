@@ -12,7 +12,11 @@ from google.genai import errors, types
 from pydantic import BaseModel
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
-from company_health_analyst.app_utils.config import AGENT_MODEL, GCP_LOCATION, GCP_PROJECT_ID
+from company_health_analyst.app_utils.config import (
+    AGENT_MODEL,
+    GCP_LOCATION,
+    GCP_PROJECT_ID,
+)
 from company_health_analyst.prompts import PromptTemplate
 from company_health_analyst.schemas import (
     IntakeValidationResponse,
@@ -90,8 +94,6 @@ async def classify_intent_async(query: str) -> IntentCategory:
             response_mime_type="application/json",
             response_schema=IntentClassification,
             thinking_config=types.ThinkingConfig(
-                # LOW is the lowest level supported across Gemini 3.x text models;
-                # gemini-3.8-flash rejects MINIMAL with a 400.
                 thinking_level=types.ThinkingLevel.LOW,
             ),
         ),

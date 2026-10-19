@@ -11,8 +11,9 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools._node_tool import NodeTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow import JoinNode
+from google.genai import types as genai_types
 
-from company_health_analyst.app_utils.config import AGENT_MODEL
+from company_health_analyst.app_utils.config import AGENT_MODEL, THINKING_LEVEL
 from company_health_analyst.nodes import (
     format_search_inputs,
     run_internal_search,
@@ -100,4 +101,9 @@ root_agent = LlmAgent(
         search_previous_reports,
     ],
     after_tool_callback=skip_report_summarization,
+    generate_content_config=genai_types.GenerateContentConfig(
+        thinking_config=genai_types.ThinkingConfig(
+            thinking_level=THINKING_LEVEL,
+        ),
+    ),
 )

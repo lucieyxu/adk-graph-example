@@ -17,6 +17,7 @@ from google.adk.tools._node_tool import NodeTool
 from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow import START, Workflow
 
+from company_health_analyst.app_utils.config import THINKING_LEVEL
 from company_health_analyst.graph import (
     PIPELINE_TOOL_NAME,
     company_health_pipeline,
@@ -37,6 +38,7 @@ from company_health_analyst.schemas import (
     PipelineInput,
     SearchResultItem,
 )
+from company_health_analyst.subagents import report_synthesizer_agent
 
 
 def _ctx(state: dict, resume_inputs: dict | None = None) -> Context:
@@ -54,6 +56,14 @@ def test_root_agent_is_conversational_coordinator():
     """Verify the root agent is an LlmAgent, not the workflow itself."""
     assert isinstance(root_agent, LlmAgent)
     assert root_agent.name == "company_health_coordinator"
+
+
+def test_every_agent_uses_shared_thinking_level():
+    """Verify all LlmAgents think at the shared level so topologies compare like for like."""
+    for agent in (root_agent, report_synthesizer_agent):
+        assert agent.generate_content_config is not None, agent.name
+        assert agent.generate_content_config.thinking_config is not None, agent.name
+        assert agent.generate_content_config.thinking_config.thinking_level == THINKING_LEVEL
 
 
 def test_root_agent_exposes_pipeline_as_node_tool():

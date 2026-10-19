@@ -1,7 +1,7 @@
 from google.adk.agents import LlmAgent
 from google.genai import types as genai_types
 
-from company_health_analyst.app_utils.config import AGENT_MODEL
+from company_health_analyst.app_utils.config import AGENT_MODEL, THINKING_LEVEL
 from company_health_analyst.prompts import PromptTemplate
 
 report_synthesizer_agent = LlmAgent(
@@ -10,7 +10,7 @@ report_synthesizer_agent = LlmAgent(
     instruction=PromptTemplate.REPORT_SYNTHESIZER,
     generate_content_config=genai_types.GenerateContentConfig(
         thinking_config=genai_types.ThinkingConfig(
-            thinking_level=genai_types.ThinkingLevel.LOW,
+            thinking_level=THINKING_LEVEL,
         ),
     ),
 )

@@ -21,9 +21,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from google.adk.agents.context import Context
-from google.genai import errors, types
+from google.genai import errors
 from tenacity import wait_none
 
+from company_health_analyst.app_utils.config import THINKING_LEVEL
 from company_health_analyst.nodes import (
     _is_transient_api_error,
     classify_intent_async,
@@ -66,8 +67,8 @@ def _classify_without_backoff() -> Callable[[str], Awaitable[IntentCategory]]:
 
 
 @pytest.mark.asyncio
-async def test_classifier_uses_low_thinking_level(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verifies the classifier requests LOW thinking; gemini-3.8-flash rejects MINIMAL."""
+async def test_classifier_uses_shared_thinking_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies the classifier uses the same thinking level as every agent in the app."""
     generate_content = _mock_generate_content(monkeypatch, [_classified(IntentCategory.MODIFY)])
 
     intent = await classify_intent_async(QUERY)
@@ -75,7 +76,7 @@ async def test_classifier_uses_low_thinking_level(monkeypatch: pytest.MonkeyPatc
     assert intent == IntentCategory.MODIFY
     assert generate_content.await_args is not None
     config = generate_content.await_args.kwargs["config"]
-    assert config.thinking_config.thinking_level == types.ThinkingLevel.LOW
+    assert config.thinking_config.thinking_level == THINKING_LEVEL
 
 
 @pytest.mark.parametrize(

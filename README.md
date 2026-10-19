@@ -39,7 +39,7 @@ This 10-turn multi-turn scenario demonstrates conversational intake via ADK Task
     - **Agent:** [`intake_agent`](company_health_analyst/subagents.py) calls `finish_task` with updated parameters (`XYZ`, `Asia`, `2025`), triggering fresh searches and generating an updated Company Health Report.
 
 ### Demo conversation video
-<video src="https://github.com/user-attachments/assets/293cc24b-6b7b-49cf-aa8a-39282d51cc2f" controls="controls" style="max-width: 100%;">
+<video src="https://github.com/user-attachments/assets/43a1483a-276d-47f8-8a16-c173adeb480c" controls="controls" style="max-width: 100%;">
   Your browser does not support the video tag.
 </video>
 

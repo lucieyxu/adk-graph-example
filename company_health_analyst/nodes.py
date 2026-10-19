@@ -8,9 +8,9 @@ from google.adk.agents.context import Context
 from google.adk.events.event_actions import EventActions
 from google.adk.events.request_input import RequestInput
 from google.adk.workflow import node
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from company_health_analyst.app_utils.config import AGENT_MODEL, GCP_LOCATION, GCP_PROJECT_ID
 from company_health_analyst.prompts import PromptTemplate
@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 _genai_client: genai.Client | None = None
 
+# Same status codes google-genai retries when HttpRetryOptions are enabled. Anything else
+# (e.g. 400 for an unsupported config) is a deterministic failure that retrying cannot fix.
+_TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+
 
 def _get_genai_client() -> genai.Client:
     """Returns a singleton genai.Client initialized from environment ADC."""
@@ -46,10 +50,22 @@ def _get_genai_client() -> genai.Client:
     return _genai_client
 
 
+def _is_transient_api_error(exc: BaseException) -> bool:
+    """Returns True for Vertex AI errors worth retrying: timeouts, quota limits, server faults.
+
+    Args:
+        exc: The exception raised by the Vertex AI call.
+
+    Returns:
+        True if the exception is an APIError whose status code is in _TRANSIENT_STATUS_CODES.
+    """
+    return isinstance(exc, errors.APIError) and exc.code in _TRANSIENT_STATUS_CODES
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type(Exception),
+    retry=retry_if_exception(_is_transient_api_error),
     reraise=True,
 )
 async def classify_intent_async(query: str) -> IntentCategory:
@@ -60,6 +76,10 @@ async def classify_intent_async(query: str) -> IntentCategory:
 
     Returns:
         The classified IntentCategory enum.
+
+    Raises:
+        errors.APIError: Immediately for non-transient errors, or after the final retry
+            for transient ones.
     """
     client = _get_genai_client()
     response = await client.aio.models.generate_content(
@@ -70,7 +90,9 @@ async def classify_intent_async(query: str) -> IntentCategory:
             response_mime_type="application/json",
             response_schema=IntentClassification,
             thinking_config=types.ThinkingConfig(
-                thinking_level=types.ThinkingLevel.MINIMAL,
+                # LOW is the lowest level supported across Gemini 3.x text models;
+                # gemini-3.8-flash rejects MINIMAL with a 400.
+                thinking_level=types.ThinkingLevel.LOW,
             ),
         ),
     )
@@ -102,8 +124,11 @@ async def route_user_request(node_input: Any, ctx: Context) -> Event | None:
     if is_report_created or has_brief:
         try:
             intent = await classify_intent_async(query)
-        except Exception as exc:
-            logger.warning("Intent classification failed: %s. Falling back to explanation.", exc)
+        except Exception:
+            logger.exception(
+                "Intent classification failed for query '%s'; falling back to explanation.",
+                query,
+            )
             intent = IntentCategory.FALLBACK
 
         logger.info(

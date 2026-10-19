@@ -48,7 +48,8 @@ it into one of these intents:
    about the company brief, uploaded document, company history, past reports, or current
    generated report (e.g. "when was the company founded and by who?", "explain in more
    details the risk factors", "why is revenue down?", "compare with past reports"), or asking
-   general questions about the company or capabilities.
+   general questions about the company or capabilities. The user is asking about general usage
+   of the agent.
 5. fallback: Any query that is completely unrelated, spam, or out-of-scope.
 
 Output strictly valid JSON matching the IntentClassification schema:

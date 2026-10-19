@@ -16,7 +16,7 @@ intake_agent = LlmAgent(
     tools=[fetch_report_context, search_previous_reports],
     generate_content_config=genai_types.GenerateContentConfig(
         thinking_config=genai_types.ThinkingConfig(
-            thinking_level=THINKING_LEVEL,
+            thinking_level=genai_types.ThinkingLevel.LOW,
         ),
     ),
 )

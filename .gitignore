@@ -209,3 +209,6 @@ tools/a2a-inspector/
 *-key.json
 credentials*.json
 .git-credentials
+
+# Session benchmark output (benchmarks/session_benchmark.py)
+benchmarks/results/

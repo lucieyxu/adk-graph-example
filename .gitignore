@@ -209,3 +209,6 @@ tools/a2a-inspector/
 *-key.json
 credentials*.json
 .git-credentials
+
+# Session benchmark output (benchmarks/workflow_as_tool_benchmark.py)
+benchmarks/results/
